@@ -121,15 +121,32 @@ def in_search_zone(point: Point, bounds: Rect) -> bool:
 
 
 def in_result_zone(point: Point, bounds: Rect) -> bool:
-    """Left-of-center list area. The star control sits further right."""
+    """Repository titles. Stars sit further right, past 62% of the window."""
 
     x, y = point
-    left, top, right, bottom = bounds
+    left, top, _right, bottom = bounds
     width = _width(bounds)
     return (
-        (left + width * 0.32) <= x <= (left + width * 0.70)
-        and (top + 220) <= y <= (bottom - 30)
+        (left + max(120.0, width * 0.18)) <= x <= (left + width * 0.62)
+        and (top + 160) <= y <= (bottom - 40)
     )
+
+
+def content_frame(windows: list[Rect]) -> Rect | None:
+    """The page window. Menu-bar strips and popovers are too small to use."""
+
+    best: Rect | None = None
+    best_area = 0.0
+    for left, top, right, bottom in windows:
+        width = right - left
+        height = bottom - top
+        if width < 400 or height < 300:
+            continue
+        area = width * height
+        if area > best_area:
+            best_area = area
+            best = (left, top, right, bottom)
+    return best
 
 
 def in_readme_zone(point: Point, bounds: Rect) -> bool:

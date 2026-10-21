@@ -12,7 +12,7 @@ from ctypes import POINTER, byref, c_bool, c_char_p, c_int32, c_long, c_void_p
 from dataclasses import dataclass
 
 from activitysim.osa import OsaError
-from activitysim.search import Rect, accept_result, in_search_zone
+from activitysim.search import Rect, accept_result, content_frame, in_search_zone
 
 APPLICATION_SERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
 CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
@@ -258,6 +258,54 @@ def chrome_pid() -> int | None:
     return _PINNED_PID
 
 
+def content_bounds() -> Rect | None:
+    """Screen bounds of the signed-out page, not the menu-bar strip."""
+
+    pid = chrome_pid()
+    if not pid:
+        return None
+    app, _cf = _ready()
+    application = app.AXUIElementCreateApplication(pid)
+    if not application:
+        return None
+    try:
+        _enable_web_content(application)
+        windows = _children_via_windows(application)
+        frames: list[Rect] = []
+        try:
+            for window in windows:
+                origin = _origin(window)
+                size = _size(window)
+                if origin is None or size is None:
+                    continue
+                width, height = size
+                frames.append((origin[0], origin[1], origin[0] + width, origin[1] + height))
+        finally:
+            for window in windows:
+                _release(window)
+        return content_frame(frames)
+    finally:
+        _release(application)
+
+
+def enable_web_content(pid: int) -> None:
+    """Ask Chrome to put the page in the accessibility tree.
+
+    Pages that loaded before this call stay hidden until the next navigation.
+    """
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("bad pid")
+    app, _cf = _ready()
+    application = app.AXUIElementCreateApplication(pid)
+    if not application:
+        return
+    try:
+        _enable_web_content(application)
+    finally:
+        _release(application)
+
+
 def _enable_web_content(application) -> None:
     app, cf = _ready()
     app.AXUIElementSetAttributeValue(
@@ -265,16 +313,26 @@ def _enable_web_content(application) -> None:
     )
 
 
-def _focused_window(application):
-    window = _copy(application, "AXFocusedWindow")
-    if window:
-        return window
+def _content_window(application):
+    """The page window. The focused window is often the address-bar strip."""
+
     windows = _children_via_windows(application)
-    if not windows:
-        return None
-    chosen = windows[0]
-    for extra in windows[1:]:
-        _release(extra)
+    chosen = None
+    chosen_area = 0.0
+    for window in windows:
+        origin = _origin(window)
+        size = _size(window)
+        if origin is None or size is None or size[0] < 400 or size[1] < 300:
+            _release(window)
+            continue
+        area = size[0] * size[1]
+        if area > chosen_area:
+            if chosen is not None:
+                _release(chosen)
+            chosen = window
+            chosen_area = area
+        else:
+            _release(window)
     return chosen
 
 
@@ -331,7 +389,7 @@ def _page_elements() -> list[Element]:
         return []
     try:
         _enable_web_content(application)
-        window = _focused_window(application)
+        window = _content_window(application)
         if not window:
             return []
         try:

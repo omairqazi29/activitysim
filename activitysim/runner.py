@@ -214,13 +214,9 @@ class Runner:
             return
         target = results_url(query)
         self.results_url = target
-        if self.can_keys and can_type(target):
-            self.log("typing the results url")
-            self._type_url(target)
-        else:
-            self.browser.navigate(target)
-            self._remember_navigation(target)
-            self.log(f"open {target}")
+        self.browser.navigate(target)
+        self._remember_navigation(target)
+        self.log(f"open {target}")
         self._sleep(self.rng.uniform(1.6, 2.6))
 
     def _open_result(self) -> None:

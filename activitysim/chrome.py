@@ -17,7 +17,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from activitysim.ax import set_chrome_pid
+from activitysim.ax import content_bounds, enable_web_content, set_chrome_pid
 from activitysim.cdp import CdpError, activate_page, call, close_page, list_pages, open_page
 from activitysim.osa import OsaError, run_osascript
 from activitysim.places import safe_url
@@ -310,6 +310,9 @@ class Chrome:
             self._ws = str(pages[0].get("webSocketDebuggerUrl") or "")
             self.window_id = str(self.pid)
             set_chrome_pid(self.pid)
+            enable_web_content(self.pid)
+            call(self._ws, "Page.reload", {})
+            self._wait_until_loaded()
             self._enter_fullscreen()
         except (ChromeError, CdpError, OSError):
             self.close_window()
@@ -341,16 +344,14 @@ class Chrome:
 
     def bounds(self) -> tuple[float, float, float, float]:
         self._require_pid()
-        raw = run_osascript(script_bounds(self.pid or 0))
-        parts = [float(piece) for piece in raw.split()]
-        if len(parts) != 4:
-            raise ChromeError(f"unexpected window bounds {raw!r}")
-        left, top, width, height = parts
-        right = left + width
-        bottom = top + height
-        if right <= left or bottom <= top:
-            raise ChromeError(f"unexpected window bounds {raw!r}")
-        return left, top, right, bottom
+        set_chrome_pid(self.pid)
+        frame = content_bounds()
+        if frame is None:
+            raise ChromeError("the signed-out Chrome window is not on screen")
+        left, top, right, bottom = frame
+        if right - left < 400 or bottom - top < 300:
+            raise ChromeError(f"unexpected window bounds {frame!r}")
+        return frame
 
     def tab_count(self) -> int:
         return len(self._pages())
@@ -422,6 +423,24 @@ class Chrome:
         except subprocess.TimeoutExpired:
             if pid and _is_our_process(pid, profile):
                 process.kill()
+
+    def _wait_until_loaded(self) -> None:
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            if self._process is not None and self._process.poll() is not None:
+                raise ChromeError("signed-out Chrome exited")
+            try:
+                result = call(
+                    self._ws,
+                    "Runtime.evaluate",
+                    {"expression": "document.readyState", "returnByValue": True},
+                )
+            except CdpError:
+                time.sleep(0.2)
+                continue
+            if result.get("result", {}).get("value") == "complete":
+                return
+            time.sleep(0.2)
 
     def _enter_fullscreen(self) -> None:
         try:

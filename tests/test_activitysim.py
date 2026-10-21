@@ -49,6 +49,7 @@ from activitysim.search import (
     QUERIES,
     accept_result,
     bad_label,
+    content_frame,
     in_readme_zone,
     in_result_zone,
     in_search_zone,
@@ -425,6 +426,21 @@ class SearchGeometryTests(unittest.TestCase):
         self.assertFalse(
             accept_result("https://github.com/python/cpython", "python/cpython", star_side, self.bounds)
         )
+
+    def test_fullscreen_strip_is_not_the_page(self) -> None:
+        # Measured from the signed-out Chrome: menu strips, then the page.
+        strip = (0.0, 0.0, 1728.0, 33.0)
+        popover = (680.0, 45.0, 1048.0, 95.0)
+        page = (0.0, 121.0, 1728.0, 1117.0)
+        self.assertEqual(content_frame([strip, popover, page]), page)
+        self.assertIsNone(content_frame([strip, popover]))
+        repo = (454.0, 338.0)
+        star = (1286.0, 344.0)
+        search = (945.0, 289.0)
+        self.assertTrue(in_result_zone(repo, page), repo)
+        self.assertFalse(in_result_zone(star, page), star)
+        self.assertTrue(in_search_zone(search, page), search)
+        self.assertGreaterEqual(len(result_points(page)), 3)
 
 
 class RunnerTests(unittest.TestCase):
