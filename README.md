@@ -43,7 +43,7 @@ Your other Chrome windows are not controlled.
 - It types only into the GitHub search box or the address bar, and only while Chrome is in front.
 - It will not send Cmd+Q, Cmd+W, or Space. Space would activate a focused button. Cmd+W would close a tab.
 - It will not open `javascript:`, `file:`, or URLs that contain a username and password.
-- It backs off for 3 minutes if you move the mouse or switch away from Chrome after it had Chrome in front. `--pause 0` turns that off.
+- It backs off for 30 seconds if you move the mouse or switch away from Chrome after it had Chrome in front. `--pause 0` turns that off.
 - It will not run as root.
 
 ## Permissions

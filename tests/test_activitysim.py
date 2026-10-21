@@ -65,7 +65,7 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
     config = Config(
         min_gap=1,
         max_gap=1,
-        pause=overrides.pop("pause", 180),
+        pause=overrides.pop("pause", 30),
         max_tabs=overrides.pop("max_tabs", 5),
         duration=overrides.pop("duration", 20),
         startup_delay=overrides.pop("startup_delay", 0),
@@ -218,6 +218,8 @@ class ScriptTests(unittest.TestCase):
             script_activate("42"),
         ]
         self.assertIn('mode:"incognito"', scripts[0])
+        self.assertIn("Enter Full Screen", scripts[0])
+        self.assertIn("Enter Full Screen", scripts[1])
         self.assertIn(r'a\"b', scripts[3])
         self.assertIn(r'win\"1', scripts[2])
         for script in scripts:

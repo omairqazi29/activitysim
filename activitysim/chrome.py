@@ -28,6 +28,12 @@ def find_chrome() -> Path | None:
 
 
 def script_open_window(url: str, incognito: bool = False) -> str:
+    """Open one window on the URL and enter macOS full screen.
+
+    The menu title is English, same assumption as the US keyboard used for typing.
+    If that click fails, the window is zoomed so it still fills the screen.
+    """
+
     _require_url(url)
     if incognito:
         make = 'set w to make new window with properties {mode:"incognito"}'
@@ -39,8 +45,28 @@ tell application "Google Chrome"
   {make}
   delay 0.4
   set URL of active tab of w to {as_text(url)}
-  return id of w
+  set index of w to 1
+  set wid to id of w
 end tell
+try
+  tell application "System Events"
+    tell process "Google Chrome"
+      set frontmost to true
+      repeat with mi in menu items of menu "View" of menu bar 1
+        if name of mi is "Enter Full Screen" then
+          click mi
+          exit repeat
+        end if
+      end repeat
+    end tell
+  end tell
+  delay 0.8
+on error
+  tell application "Google Chrome"
+    set zoomed of window id wid to true
+  end tell
+end try
+return wid
 """
 
 

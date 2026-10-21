@@ -27,7 +27,7 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac.
 
-This opens a new Google Chrome window on GitHub advanced search, types a
+This opens a new full screen Google Chrome window on GitHub advanced search, types a
 query, and clicks through the repository results. Those are real mouse clicks
 and keystrokes, which is what an idle check looks for.
 
@@ -82,7 +82,7 @@ def root_error(euid: int) -> str | None:
 def build_run_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="activitysim run",
-        description="Open a Chrome window and look busy inside it.",
+        description="Open a full screen Chrome window and look busy inside it.",
     )
     parser.add_argument(
         "--for",
@@ -105,7 +105,7 @@ def build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pause",
         type=float,
-        default=180,
+        default=30,
         help="back off this long after you move the mouse or leave Chrome. 0 disables",
     )
     parser.add_argument(

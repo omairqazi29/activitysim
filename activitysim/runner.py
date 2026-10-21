@@ -34,7 +34,7 @@ TEXT_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearchFiel
 class Config:
     min_gap: float = 2
     max_gap: float = 6
-    pause: float = 180
+    pause: float = 30
     max_tabs: int = 5
     duration: float = 0
     startup_delay: float = 1
