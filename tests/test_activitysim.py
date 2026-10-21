@@ -2,29 +2,32 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import random
+import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 import urllib.parse
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from activitysim.ax import chrome_pid, set_chrome_pid
+from activitysim.cdp import CdpError, call
 from activitysim.chrome import (
+    assert_locked_profile,
+    host_blocked,
+    launch_command,
+    pid_literal,
     script_activate,
-    script_back,
     script_bounds,
-    script_close_oldest,
-    script_close_window,
-    script_current_url,
-    script_navigate,
-    script_new_tab,
-    script_open_window,
-    script_reload,
-    script_scroll,
-    script_switch,
-    script_tab_count,
+    script_front_pid,
+    script_fullscreen,
+    scrub_signins,
 )
 from activitysim.cli import main, parse_duration, root_error, validate_run
 from activitysim.fakes import FakeBrowser, FakeClock, FakePointer
@@ -165,7 +168,12 @@ class PlaceTests(unittest.TestCase):
         self.assertFalse(safe_url("https://user:pass@example.com/a"))
         self.assertFalse(safe_url("https://example.com/a b"))
         with self.assertRaises(ValueError):
-            script_navigate("1", "javascript:alert(1)")
+            launch_command(
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path("/tmp/activitysim-locked"),
+                "javascript:alert(1)",
+                9222,
+            )
 
     def test_url_file_keeps_http_and_drops_the_rest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,39 +200,92 @@ class PlaceTests(unittest.TestCase):
         self.assertEqual(places.extra, ["https://example.com/a"])
 
 
-class ScriptTests(unittest.TestCase):
+class LockedChromeTests(unittest.TestCase):
     def test_applescript_quoting(self) -> None:
         self.assertEqual(as_text('a"b\\c'), '"a\\"b\\\\c"')
         with self.assertRaises(ValueError):
             as_text("line\nbreak")
 
-    def test_navigation_scripts_have_no_keystrokes(self) -> None:
-        url = 'https://example.com/a"b'
+    def test_launch_is_a_separate_signed_out_chrome(self) -> None:
+        binary = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        profile = Path("/tmp/activitysim-locked")
+        command = launch_command(binary, profile, "https://github.com/search/advanced", 9333)
+        self.assertEqual(command[0], str(binary))
+        self.assertIn(f"--user-data-dir={profile.resolve()}", command)
+        self.assertIn("--disable-sync", command)
+        self.assertIn("--use-mock-keychain", command)
+        self.assertIn("--remote-debugging-port=9333", command)
+        text = " ".join(command)
+        self.assertNotIn("Application Support/Google/Chrome", text)
+        self.assertIn("MAP x.com ~NOTFOUND", text)
+        self.assertIn("MAP *.x.com ~NOTFOUND", text)
+        self.assertIn("MAP twitter.com ~NOTFOUND", text)
+        self.assertIn("MAP *.twitter.com ~NOTFOUND", text)
+        self.assertNotIn("tell application", text)
+
+    def test_signed_in_profile_and_x_are_refused(self) -> None:
+        real = Path.home() / "Library/Application Support/Google/Chrome"
+        with self.assertRaises(ValueError):
+            assert_locked_profile(real)
+        with self.assertRaises(ValueError):
+            assert_locked_profile(real / "Default")
+        with self.assertRaises(ValueError):
+            launch_command(Path("/bin/chrome"), real, "https://example.com", 1)
+        self.assertTrue(host_blocked("https://x.com/omairqazi29/lists"))
+        self.assertTrue(host_blocked("https://mobile.twitter.com/home"))
+        self.assertTrue(host_blocked("https://pbs.twimg.com/a.png"))
+        self.assertFalse(host_blocked("https://github.com/search/advanced"))
+        self.assertFalse(host_blocked("https://example.com"))
+        self.assertFalse(host_blocked("https://notx.com"))
+        with self.assertRaises(ValueError):
+            launch_command(
+                Path("/bin/chrome"),
+                Path("/tmp/activitysim-locked"),
+                "https://x.com/home",
+                1,
+            )
+
+    def test_scrub_deletes_sessions_and_leaves_outside_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "locked"
+            outside = Path(tmp) / "secret"
+            outside.write_text("keep", encoding="utf-8")
+            cookies = profile / "Default" / "Cookies"
+            cookies.parent.mkdir(parents=True)
+            cookies.write_text("session", encoding="utf-8")
+            link = profile / "Default" / "Login Data"
+            link.symlink_to(outside)
+            scrub_signins(profile)
+            self.assertFalse(cookies.exists())
+            self.assertFalse(link.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            self.assertTrue((profile / "First Run").is_file())
+
+    def test_accessibility_pid_never_guesses_a_chrome(self) -> None:
+        set_chrome_pid(None)
+        self.addCleanup(set_chrome_pid, None)
+        self.assertIsNone(chrome_pid())
+        set_chrome_pid(4321)
+        self.assertEqual(chrome_pid(), 4321)
+        with self.assertRaises(ValueError):
+            set_chrome_pid(0)
+
+    def test_window_scripts_name_a_pid_and_have_no_keystrokes(self) -> None:
+        self.assertEqual(pid_literal(42), "42")
+        with self.assertRaises(ValueError):
+            pid_literal(True)  # type: ignore[arg-type]
         scripts = [
-            script_open_window("https://github.com/trending", incognito=True),
-            script_open_window("https://github.com/trending", incognito=False),
-            script_new_tab('win"1', "https://github.com/python/cpython/issues"),
-            script_navigate("42", url),
-            script_switch("42", 2),
-            script_close_oldest("42"),
-            script_back("42"),
-            script_reload("42"),
-            script_bounds("42"),
-            script_tab_count("42"),
-            script_scroll("42", 240),
-            script_scroll("42", -120),
-            script_close_window("42"),
-            script_current_url("42"),
-            script_activate("42"),
+            script_activate(42),
+            script_bounds(42),
+            script_fullscreen(42),
+            script_front_pid(),
         ]
-        self.assertIn('mode:"incognito"', scripts[0])
-        self.assertIn("Enter Full Screen", scripts[0])
-        self.assertIn("Enter Full Screen", scripts[1])
-        self.assertIn(r'a\"b', scripts[3])
-        self.assertIn(r'win\"1', scripts[2])
+        self.assertIn("unix id is 42", scripts[0])
+        self.assertIn("Enter Full Screen", scripts[2])
         for script in scripts:
             self.assertNotIn("keystroke", script)
             self.assertNotIn("key code", script)
+            self.assertNotIn('tell application "Google Chrome"', script)
         with tempfile.TemporaryDirectory() as tmp:
             for index, script in enumerate(scripts):
                 source = Path(tmp) / f"{index}.applescript"
@@ -238,6 +299,66 @@ class ScriptTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(output.exists())
+
+    def test_source_never_addresses_chrome_by_application_name(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "activitysim"
+        for path in root.glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn('tell application "Google Chrome"', text, path.name)
+            self.assertNotIn('"-a", "Google Chrome"', text, path.name)
+
+    def test_debugger_client_round_trip(self) -> None:
+        payload = json.dumps({"id": 1, "result": {"result": {"value": "https://example.com"}}})
+        frame = bytes([0x81, len(payload)]) + payload.encode()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        box: dict[str, bytes] = {}
+
+        def serve() -> None:
+            conn, _addr = server.accept()
+            with conn:
+                data = bytearray()
+                while b"\r\n\r\n" not in data:
+                    data.extend(conn.recv(4096))
+                key = ""
+                for line in data.split(b"\r\n\r\n", 1)[0].decode().split("\r\n"):
+                    if line.lower().startswith("sec-websocket-key:"):
+                        key = line.split(":", 1)[1].strip()
+                accept = base64.b64encode(
+                    hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+                ).decode()
+                handshake = (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n"
+                    "\r\n"
+                ).encode()
+                conn.sendall(handshake + frame)
+                incoming = bytearray()
+                while len(incoming) < 2:
+                    incoming.extend(conn.recv(4096))
+                length = incoming[1] & 0x7F
+                need = 2 + 4 + length
+                while len(incoming) < need:
+                    incoming.extend(conn.recv(4096))
+                mask = incoming[2:6]
+                raw = incoming[6:6 + length]
+                box["client"] = bytes(byte ^ mask[index % 4] for index, byte in enumerate(raw))
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            result = call(f"ws://127.0.0.1:{port}/devtools/page/ABC", "Runtime.evaluate")
+        finally:
+            thread.join(timeout=5)
+            server.close()
+        self.assertEqual(result["result"]["value"], "https://example.com")
+        self.assertIn(b"Runtime.evaluate", box["client"])
+        with self.assertRaises(CdpError):
+            call("ws://example.com/devtools/page/ABC", "Runtime.evaluate")
 
 
 class InputPolicyTests(unittest.TestCase):
@@ -377,6 +498,16 @@ class RunnerTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             runner.run()
         self.assertTrue(any(line.startswith("paused") for line in runner.history))
+
+    def test_signed_in_chrome_is_not_clicked(self) -> None:
+        runner, browser, pointer, _clock = make_runner(duration=6, pause=30, seed=6)
+        browser.is_front = lambda: False  # type: ignore[method-assign]
+        runner.frontmost = lambda: "Google Chrome"
+        with redirect_stdout(StringIO()):
+            runner.run()
+        self.assertTrue(any(line.startswith("paused") for line in runner.history))
+        self.assertEqual(pointer.clicks, [])
+        self.assertEqual(pointer.typed, [])
 
 
 class CliTests(unittest.TestCase):

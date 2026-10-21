@@ -1,10 +1,14 @@
 # activitysim
 
-A small macOS program that looks like someone is using the machine. It opens a
-**new** Google Chrome window, runs a GitHub advanced search, and clicks through
-the results. The clicks and keystrokes are real input events. An idle check
-that only watches the pointer and keyboard will see them. Changing a tab with
-AppleScript alone will not.
+A small macOS program that looks like someone is using the machine. It opens
+its **own** signed-out Google Chrome, runs a GitHub advanced search, and clicks
+through the results. The clicks and keystrokes are real input events. An idle
+check that only watches the pointer and keyboard will see them. Changing a tab
+with AppleScript alone will not.
+
+That Chrome is a separate process with an empty profile. It does not see the
+cookies, passwords, or keychain of the Chrome you are signed into. X and
+Twitter do not resolve in it.
 
 It is meant to run on your own Mac while sleep is disabled. It does not change
 power settings. Pair it with the `pmset` command below.
@@ -14,7 +18,7 @@ sudo pmset -a disablesleep 1
 python3 -m activitysim
 ```
 
-Stop it with Ctrl+C. The Chrome window stays open. Restore sleep later:
+Stop it with Ctrl+C. The signed-out Chrome window stays open. Restore sleep later:
 
 ```bash
 sudo pmset -a disablesleep 0
@@ -27,7 +31,8 @@ only for `pmset`.
 
 - Asks for Accessibility if the pointer cannot move yet, opens that Settings
   pane, and waits until the switch is on.
-- Opens one new Chrome window on GitHub advanced search.
+- Opens one signed-out Chrome window on GitHub advanced search. Your Chrome
+  stays as it was.
 - Clicks the search box, types a query such as `language:python stars:>1000`,
   and presses Return. Typed characters assume a US keyboard.
 - Clicks repository rows in the results, a few seconds apart.
@@ -35,12 +40,16 @@ only for `pmset`.
 - Presses Command+Left to go back, then clicks the next result.
 - Starts another advanced search after a handful of results.
 
-Your other Chrome windows are not controlled.
+Your signed-in Chrome is not controlled. If that Chrome is the one in front,
+the simulator backs off instead of clicking it.
 
 ## What it will not do
 
+- It will not open a window in the Chrome that is signed into X or GitHub.
+- It will not read that Chrome's cookies, passwords, or the login keychain.
+- It will not open X or Twitter. Those hosts do not resolve in the signed-out Chrome.
 - It will not click the right side of a result row, where Star, Fork, and Watch sit.
-- It types only into the GitHub search box or the address bar, and only while Chrome is in front.
+- It types only into the GitHub search box or the address bar, and only while its own Chrome is in front.
 - It will not send Cmd+Q, Cmd+W, or Space. Space would activate a focused button. Cmd+W would close a tab.
 - It will not open `javascript:`, `file:`, or URLs that contain a username and password.
 - It backs off for 30 seconds if you move the mouse or switch away from Chrome after it had Chrome in front. `--pause 0` turns that off.
@@ -73,7 +82,6 @@ python3 -m activitysim run --for 2h
 python3 -m activitysim run --min-gap 4 --max-gap 15 --max-tabs 4
 python3 -m activitysim run --mouse-only
 python3 -m activitysim run --no-keyboard
-python3 -m activitysim run --incognito
 python3 -m activitysim run --close-on-exit
 python3 -m activitysim run --urls urls.example.txt
 python3 -m activitysim run --dry-run --for 1m --seed 7

@@ -27,15 +27,16 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac.
 
-This opens a new full screen Google Chrome window on GitHub advanced search, types a
+This opens a separate signed-out Chrome on GitHub advanced search, types a
 query, and clicks through the repository results. Those are real mouse clicks
-and keystrokes, which is what an idle check looks for.
+and keystrokes, which is what an idle check looks for. Your signed-in Chrome
+is not used, so the window has no X or GitHub session.
 
 If Accessibility is off, macOS is prompted and System Settings opens. The run
 waits until the switch is on. Without that permission it stops, because
 AppleScript alone does not count as activity.
 
-Your other Chrome windows are left alone. Clicks stay on the search box and
+Your signed-in Chrome is left alone. Clicks stay on the search box and
 the result list, not on Star, Fork, or Watch. Power settings are not changed.
 
   python3 -m activitysim
@@ -127,7 +128,7 @@ def build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--incognito",
         action="store_true",
-        help="use a private Chrome window",
+        help="accepted for old commands. the window is always a separate signed-out Chrome",
     )
     parser.add_argument(
         "--close-on-exit",
@@ -247,7 +248,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 focused_role=lambda: "AXTextField",
             )
         else:
-            browser = Chrome(incognito=args.incognito)
+            browser = Chrome()
             pointer = MacInput(rng)
             runner = Runner(
                 config,
@@ -289,6 +290,8 @@ def doctor(argv: list[str]) -> int:
         print("Google Chrome: not installed")
     else:
         print(f"Google Chrome: {chrome}")
+        print(f"signed-out profile: {Chrome().profile}")
+        print("your signed-in Chrome is not used")
     print(f"python: {sys.executable}")
     print(f"accessibility trusted: {accessibility_trusted()}")
     print("asking macOS for Accessibility, then nudging the pointer 2 pixels")

@@ -118,7 +118,7 @@ class Runner:
         self.browser.open_window(ADVANCED_URL)
         self._last_front = self.frontmost()
         self.log(f"opened Chrome at {ADVANCED_URL}")
-        self.log("other Chrome windows are not controlled")
+        self.log("signed-out Chrome only. your X and GitHub logins are not in it")
         self.mode = "search"
         while not self._expired(start):
             self._sleep(self.rng.uniform(self.config.min_gap, self.config.max_gap))
@@ -196,7 +196,13 @@ class Runner:
         if box is not None and self.can_point:
             clicked = self._click(box, "advanced search box")
             self._sleep(0.15)
-        if clicked and self._text_focused() and self.can_keys and can_type(query):
+        if (
+            clicked
+            and self._text_focused()
+            and self.can_keys
+            and can_type(query)
+            and self._our_window_is_front()
+        ):
             self.pointer.hotkey("a", ("command",))
             self.pointer.type_text(query)
             self.pointer.hotkey("return", ())
@@ -236,6 +242,9 @@ class Runner:
             key = self.rng.choice(["down", "down", "pagedown", "up"])
             count = self.rng.randint(2, 4)
             for _ in range(count):
+                if not self._our_window_is_front():
+                    self.log("skipped keys, signed-out Chrome is not in front")
+                    break
                 self.pointer.hotkey(key, ())
                 self._sleep(self.rng.uniform(0.05, 0.16))
             self.log(f"key {key} x{count}")
@@ -314,6 +323,11 @@ class Runner:
             return
         self.pointer.hotkey("l", ("command",))
         self._sleep(0.12)
+        if not self._our_window_is_front():
+            self.log("skipped typing, signed-out Chrome is not in front")
+            self.browser.navigate(url)
+            self._remember_navigation(url)
+            return
         self.pointer.type_text(url)
         self.pointer.hotkey("return", ())
         self._remember_navigation(url)
@@ -323,6 +337,9 @@ class Runner:
             return False
         self.pointer.move_to(point[0], point[1])
         self._sleep(self.rng.uniform(0.05, 0.15))
+        if not self._our_window_is_front():
+            self.log("skipped click, signed-out Chrome is not in front")
+            return False
         self.pointer.click(point[0], point[1])
         self.log(f"click {label}")
         return True
@@ -341,9 +358,28 @@ class Runner:
         except (OsaError, OSError, ValueError, AttributeError):
             return ""
 
+    def _our_window_is_front(self) -> bool:
+        check = getattr(self.browser, "is_front", None)
+        if check is None:
+            return self.frontmost() == "Google Chrome"
+        try:
+            return bool(check())
+        except (OsaError, OSError, ValueError):
+            return False
+
+    def _other_chrome_is_front(self) -> bool:
+        """The signed-in Chrome is in front. Both processes are named Google Chrome."""
+
+        if not getattr(self.browser, "window_id", None):
+            return False
+        check = getattr(self.browser, "is_front", None)
+        if check is None or self.frontmost() != "Google Chrome":
+            return False
+        return not self._our_window_is_front()
+
     def _arm(self) -> bool:
         self._activate()
-        return self.frontmost() == "Google Chrome"
+        return self._our_window_is_front()
 
     def _activate(self) -> None:
         self.browser.activate()
@@ -372,7 +408,7 @@ class Runner:
             self._last_front = front
         if self.config.pause <= 0:
             return False
-        return moved or left
+        return moved or left or self._other_chrome_is_front()
 
     def _pause(self, start: float) -> None:
         self.log(f"paused {self.config.pause:.0f}s because you are using the machine")
@@ -391,7 +427,7 @@ class Runner:
         switched = front is not None and self._last_front is not None and front != self._last_front
         if front is not None:
             self._last_front = front
-        return moved or switched
+        return moved or switched or self._other_chrome_is_front()
 
     def _expired(self, start: float) -> bool:
         return bool(self.config.duration) and (self.clock() - start) >= self.config.duration

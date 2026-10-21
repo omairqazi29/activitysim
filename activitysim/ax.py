@@ -11,7 +11,7 @@ import ctypes
 from ctypes import POINTER, byref, c_bool, c_char_p, c_int32, c_long, c_void_p
 from dataclasses import dataclass
 
-from activitysim.osa import OsaError, run_osascript
+from activitysim.osa import OsaError
 from activitysim.search import Rect, accept_result, in_search_zone
 
 APPLICATION_SERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
@@ -239,24 +239,23 @@ def _describe(element) -> Element | None:
     )
 
 
+_PINNED_PID: int | None = None
+
+
+def set_chrome_pid(pid: int | None) -> None:
+    """Pin clicks to the signed-out Chrome. None reads no Chrome at all."""
+
+    global _PINNED_PID
+    if pid is None:
+        _PINNED_PID = None
+        return
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("bad pid")
+    _PINNED_PID = pid
+
+
 def chrome_pid() -> int | None:
-    try:
-        raw = run_osascript(
-            """
-tell application "System Events"
-  if exists process "Google Chrome" then
-    return unix id of process "Google Chrome"
-  end if
-  return ""
-end tell
-"""
-        )
-    except OsaError:
-        return None
-    raw = raw.strip()
-    if raw.isdigit():
-        return int(raw)
-    return None
+    return _PINNED_PID
 
 
 def _enable_web_content(application) -> None:
