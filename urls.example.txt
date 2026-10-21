@@ -1,0 +1,11 @@
+# Optional extra pages. One http(s) URL per line.
+# Lines starting with # are ignored.
+# Load them with: python3 -m activitysim run --urls urls.example.txt
+#
+# Non-http URLs are ignored. Nothing in this file is opened unless you pass --urls.
+
+https://github.com/torvalds/linux
+https://github.com/python/cpython
+https://news.ycombinator.com
+https://en.wikipedia.org/wiki/Special:Random
+https://docs.python.org/3/tutorial/index.html

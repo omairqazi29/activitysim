@@ -1,0 +1,19 @@
+[project]
+name = "activitysim"
+version = "0.1.0"
+description = "macOS activity simulator that browses public pages and moves the pointer."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "activitysim contributors" }]
+keywords = ["macos", "automation", "activity", "chrome"]
+
+[project.scripts]
+activitysim = "activitysim.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["activitysim*"]
