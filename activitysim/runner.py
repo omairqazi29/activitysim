@@ -409,8 +409,11 @@ class Runner:
     def _pause(self, start: float) -> None:
         self.log(f"paused {self.config.pause:.0f}s because you are using the machine")
         end = self.clock() + self.config.pause
-        while not self._expired(start) and self.clock() < end:
-            self._sleep(min(5, end - self.clock()))
+        while not self._expired(start):
+            remaining = end - self.clock()
+            if remaining <= 0:
+                break
+            self._sleep(min(5, remaining))
             if self._still_active():
                 self.log("still in use, pause extended")
                 end = self.clock() + self.config.pause
@@ -432,5 +435,8 @@ class Runner:
         if seconds <= 0:
             return
         end = self.clock() + seconds
-        while self.clock() < end - 1e-9:
-            self.sleep(min(0.25, end - self.clock()))
+        while True:
+            remaining = end - self.clock()
+            if remaining <= 0:
+                return
+            self.sleep(min(0.25, remaining))

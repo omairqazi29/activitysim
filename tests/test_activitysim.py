@@ -515,6 +515,19 @@ class RunnerTests(unittest.TestCase):
             runner.run()
         self.assertTrue(any(line.startswith("paused") for line in runner.history))
 
+    def test_sleep_ignores_a_clock_that_jumps_past_the_deadline(self) -> None:
+        runner, _browser, _pointer, clock = make_runner(duration=5, seed=1)
+        naps: list[float] = []
+
+        def jump_ahead(seconds: float) -> None:
+            self.assertGreaterEqual(seconds, 0)
+            naps.append(seconds)
+            clock.now += seconds + 10
+
+        runner.sleep = jump_ahead
+        runner._sleep(1)
+        self.assertEqual(naps, [0.25])
+
     def test_signed_in_chrome_is_not_clicked(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=6, pause=30, seed=6)
         browser.is_front = lambda: False  # type: ignore[method-assign]
