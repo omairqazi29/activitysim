@@ -1,10 +1,13 @@
 # activitysim
 
 A small program for macOS and Windows that looks like someone is using the
-machine. It opens its **own** signed-out Google Chrome, runs a GitHub advanced
-search, and clicks through the results. The clicks and keystrokes are real
+machine. It opens its **own** signed-out Google Chrome, searches GitHub, and
+browses public frontier-benchmark sites. The clicks and keystrokes are real
 input events. An idle check that only watches the pointer and keyboard will
 see them. Changing a tab with AppleScript alone will not.
+
+A normal run prints `launching dev browser` and then stays quiet. Errors are
+printed on their own.
 
 That Chrome is a separate process with an empty profile. It does not see the
 cookies, passwords, or keychain of the Chrome you are signed into. X and
@@ -49,14 +52,20 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 
 - Asks for Accessibility if the pointer cannot move yet, opens that Settings
   pane, and waits until the switch is on.
-- Opens one signed-out Chrome window on GitHub advanced search. Your Chrome
-  stays as it was.
-- Clicks the search box, types a query such as `language:python stars:>1000`,
-  and presses Return. Typed characters assume a US keyboard.
-- Clicks repository rows in the results, a few seconds apart.
-- On each result, presses arrow keys, scrolls, and clicks in the page body.
-- Presses Command+Left to go back, then clicks the next result.
-- Starts another advanced search after a handful of results.
+- Opens one signed-out Chrome window. Your Chrome stays as it was. If that
+  window opens, the program prints `launching dev browser` and then stays quiet.
+- Clicks the search box and types a different GitHub query each time, so the
+  same popular repositories do not stay on screen. Typed characters assume a
+  US keyboard.
+- Clicks repository rows in the results, a few seconds apart. A repository
+  already opened in this session is left again instead of being read twice.
+- Opens other repositories directly, and does not return to one until the
+  rest of the list has been used.
+- Visits DeepSWE, ProgramBench, SWE-bench, Terminal-Bench, LiveCodeBench, and
+  SWE-smith. The nav is used in a random order. Tasks are opened, and a trace
+  is opened when the site has one. Some visits end on a GPT-6 Astra page.
+- On each page, presses arrow keys, scrolls, and clicks in the page body.
+- Presses Command+Left to go back, then continues.
 
 Your signed-in Chrome is not controlled. If that Chrome is the one in front,
 the simulator backs off instead of clicking it.
