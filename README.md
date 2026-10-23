@@ -1,14 +1,16 @@
 # activitysim
 
-A small macOS program that looks like someone is using the machine. It opens
-its **own** signed-out Google Chrome, runs a GitHub advanced search, and clicks
-through the results. The clicks and keystrokes are real input events. An idle
-check that only watches the pointer and keyboard will see them. Changing a tab
-with AppleScript alone will not.
+A small program for macOS and Windows that looks like someone is using the
+machine. It opens its **own** signed-out Google Chrome, runs a GitHub advanced
+search, and clicks through the results. The clicks and keystrokes are real
+input events. An idle check that only watches the pointer and keyboard will
+see them. Changing a tab with AppleScript alone will not.
 
 That Chrome is a separate process with an empty profile. It does not see the
 cookies, passwords, or keychain of the Chrome you are signed into. X and
 Twitter do not resolve in it.
+
+## macOS
 
 It is meant to run on your own Mac while sleep is disabled. It does not change
 power settings. Pair it with the `pmset` command below.
@@ -26,6 +28,22 @@ sudo pmset -a disablesleep 0
 
 Run `activitysim` as your user. Do not put `sudo` in front of it. `sudo` is
 only for `pmset`.
+
+## Windows
+
+Install Python 3.9 or newer and Google Chrome, then:
+
+```bash
+python -m activitysim
+```
+
+Stop it with Ctrl+C. The signed-out Chrome window stays open.
+
+`--caffeinate` calls `SetThreadExecutionState` and keeps this process awake
+until it exits. It does not change the power plan.
+
+Typed characters assume a US keyboard. Run as the normal user, not as
+Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 
 ## What a session does
 
@@ -90,7 +108,8 @@ python3 -m activitysim run --caffeinate
 
 `--for` accepts `30s`, `45m`, `2h`, or `forever` (the default). `--caffeinate`
 asks macOS to ignore idle sleep until the program exits, without the persistent
-`pmset` change. `--dry-run` prints a session and touches nothing.
+`pmset` change. On Windows, `--caffeinate` calls `SetThreadExecutionState`
+and does not change the power plan. `--dry-run` prints a session and touches nothing.
 
 There are no third-party packages. Python 3.9 or newer is enough. Google Chrome
 has to be installed for browsing. `--mouse-only` does not need Chrome.
@@ -110,5 +129,6 @@ git commit -m "Add activitysim"
 gh repo create activitysim --public --source=. --push
 ```
 
-Use whatever repository name you want. The program only depends on macOS,
-Python, and Google Chrome.
+Use whatever repository name you want. On macOS the program depends on macOS,
+Python, and Google Chrome. On Windows it depends on Windows, Python, and
+Google Chrome.

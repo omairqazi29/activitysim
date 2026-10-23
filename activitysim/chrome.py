@@ -13,9 +13,11 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
+from typing import Mapping
 
 from activitysim.ax import content_bounds, enable_web_content, set_chrome_pid
 from activitysim.cdp import CdpError, activate_page, call, close_page, list_pages, open_page
@@ -24,8 +26,64 @@ from activitysim.places import safe_url
 
 ChromeError = OsaError
 
-LOCKED_PROFILE = Path.home() / "Library/Application Support/activitysim/locked-chrome"
-REAL_PROFILE = Path.home() / "Library/Application Support/Google/Chrome"
+
+def locked_profile_path(
+    system: str | None = None,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Signed-out profile. macOS stays under ~/Library. Windows uses LOCALAPPDATA."""
+
+    which = sys.platform if system is None else system
+    root_home = Path.home() if home is None else home
+    values = os.environ if env is None else env
+    if which == "win32":
+        local = values.get("LOCALAPPDATA") or str(root_home / "AppData" / "Local")
+        return Path(local) / "activitysim" / "locked-chrome"
+    return root_home / "Library/Application Support/activitysim/locked-chrome"
+
+
+def real_profile_path(
+    system: str | None = None,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Signed-in Chrome profile. This directory is never launched."""
+
+    which = sys.platform if system is None else system
+    root_home = Path.home() if home is None else home
+    values = os.environ if env is None else env
+    if which == "win32":
+        local = values.get("LOCALAPPDATA") or str(root_home / "AppData" / "Local")
+        return Path(local) / "Google" / "Chrome" / "User Data"
+    return root_home / "Library/Application Support/Google/Chrome"
+
+
+def chrome_candidates(
+    system: str | None = None,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> tuple[Path, ...]:
+    which = sys.platform if system is None else system
+    root_home = Path.home() if home is None else home
+    values = os.environ if env is None else env
+    if which == "win32":
+        program_files = values.get("PROGRAMFILES") or r"C:\Program Files"
+        program_files_x86 = values.get("PROGRAMFILES(X86)") or r"C:\Program Files (x86)"
+        local = values.get("LOCALAPPDATA") or str(root_home / "AppData" / "Local")
+        return (
+            Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe",
+            Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        )
+    return (
+        Path("/Applications/Google Chrome.app"),
+        root_home / "Applications" / "Google Chrome.app",
+    )
+
+
+LOCKED_PROFILE = locked_profile_path()
+REAL_PROFILE = real_profile_path()
 
 # Hosts that can act on the X account. They do not resolve in the locked Chrome.
 _BLOCKED_HOSTS = ("x.com", "twitter.com", "t.co", "twimg.com")
@@ -59,21 +117,19 @@ _AUTH_PATHS = (
 
 
 def find_chrome() -> Path | None:
-    candidates = (
-        Path("/Applications/Google Chrome.app"),
-        Path.home() / "Applications" / "Google Chrome.app",
-    )
-    for path in candidates:
+    for path in chrome_candidates():
         if path.exists():
             return path
     return None
 
 
 def chrome_binary() -> Path | None:
-    app = find_chrome()
-    if app is None:
+    found = find_chrome()
+    if found is None:
         return None
-    binary = app / "Contents/MacOS/Google Chrome"
+    if sys.platform == "win32":
+        return found
+    binary = found / "Contents/MacOS/Google Chrome"
     if binary.exists():
         return binary
     return None
@@ -96,7 +152,14 @@ def host_blocked(url: str) -> bool:
     return any(host == name or host.endswith("." + name) for name in _BLOCKED_HOSTS)
 
 
-def launch_command(binary: Path, profile: Path, url: str, port: int) -> list[str]:
+def launch_command(
+    binary: Path,
+    profile: Path,
+    url: str,
+    port: int,
+    *,
+    system: str | None = None,
+) -> list[str]:
     """Arguments for a signed-out Chrome. The signed-in profile is not named."""
 
     profile = assert_locked_profile(profile)
@@ -105,7 +168,7 @@ def launch_command(binary: Path, profile: Path, url: str, port: int) -> list[str
     if isinstance(port, bool) or not isinstance(port, int) or port < 1 or port > 65535:
         raise ValueError("bad debugger port")
     rules = ",".join(f"MAP {name} ~NOTFOUND,MAP *.{name} ~NOTFOUND" for name in _BLOCKED_HOSTS)
-    return [
+    command = [
         str(binary),
         f"--user-data-dir={profile}",
         "--no-first-run",
@@ -120,6 +183,10 @@ def launch_command(binary: Path, profile: Path, url: str, port: int) -> list[str
         "--new-window",
         url,
     ]
+    which = sys.platform if system is None else system
+    if which == "win32":
+        command.insert(-1, "--start-fullscreen")
+    return command
 
 
 def scrub_signins(profile: Path) -> None:
@@ -207,6 +274,10 @@ def _free_port() -> int:
 
 
 def _process_command(pid: int) -> str:
+    if sys.platform == "win32":
+        from activitysim.winchrome import command_line_for_pid, read_process_list
+
+        return command_line_for_pid(read_process_list(), pid)
     result = subprocess.run(
         ["ps", "-p", str(pid), "-ww", "-o", "command="],
         capture_output=True,
@@ -216,28 +287,103 @@ def _process_command(pid: int) -> str:
     return result.stdout.strip()
 
 
-def _command_has_profile(command: str, profile: Path) -> bool:
-    needle = f"--user-data-dir={profile}"
+def _split_command_line(command: str) -> list[str]:
+    """Split a command line. Quotes group spaces. A quote is not kept."""
+
+    args: list[str] = []
+    buf: list[str] = []
+    quote = False
+    i = 0
+    length = len(command)
+    while i < length:
+        ch = command[i]
+        if ch == "\\":
+            slashes = 0
+            while i < length and command[i] == "\\":
+                slashes += 1
+                i += 1
+            if i < length and command[i] == '"':
+                buf.append("\\" * (slashes // 2))
+                if slashes % 2 == 0:
+                    quote = not quote
+                else:
+                    buf.append('"')
+                i += 1
+            else:
+                buf.append("\\" * slashes)
+            continue
+        if ch == '"':
+            quote = not quote
+            i += 1
+            continue
+        if ch in " \t" and not quote:
+            if buf:
+                args.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        args.append("".join(buf))
+    return args
+
+
+def _unquoted_argument(command: str, needle: str) -> bool:
+    """macOS ps does not quote a profile path that contains spaces."""
+
     start = 0
     while True:
         index = command.find(needle, start)
         if index < 0:
             return False
+        before = index == 0 or command[index - 1] in " \t"
         after = index + len(needle)
-        if after >= len(command) or command[after] in " \t":
+        ended = after >= len(command) or command[after] in " \t"
+        if before and ended:
             return True
-        start = after
+        start = index + 1
 
 
-def _is_our_process(pid: int, profile: Path) -> bool:
-    command = _process_command(pid)
+def _command_has_profile(command: str, profile: Path) -> bool:
+    """True when --user-data-dir=profile is one whole argument.
+
+    Quoted Windows arguments are compared in full, so a space inside the
+    value does not end it and a longer quoted value does not match. An
+    unquoted macOS command line still matches a profile path that contains
+    spaces. The switch has to be its own argument, not a substring.
+    """
+
+    needle = f"--user-data-dir={profile}"
+    if any(arg == needle for arg in _split_command_line(command)):
+        return True
+    if '"' in command:
+        return False
+    return _unquoted_argument(command, needle)
+
+
+def _matches_our_command(command: str, profile: Path) -> bool:
+    if sys.platform == "win32":
+        from activitysim.winchrome import command_is_locked_chrome
+
+        return command_is_locked_chrome(command, profile, _command_has_profile)
     if "--type=" in command or "Google Chrome" not in command:
         return False
     return _command_has_profile(command, profile)
 
 
-def pids_for_profile(profile: Path) -> list[int]:
+def _is_our_process(pid: int, profile: Path) -> bool:
+    return _matches_our_command(_process_command(pid), profile)
+
+
+def pids_for_profile(profile: Path, *, fresh: bool = False) -> list[int]:
     profile = assert_locked_profile(profile)
+    if sys.platform == "win32":
+        from activitysim.winchrome import parse_locked_chrome_pids, read_process_list
+
+        return parse_locked_chrome_pids(
+            read_process_list(fresh=fresh), profile, _command_has_profile
+        )
     result = subprocess.run(
         ["ps", "-axww", "-o", "pid=,command="],
         capture_output=True,
@@ -252,23 +398,46 @@ def pids_for_profile(profile: Path) -> list[int]:
         pid_text, _, command = text.partition(" ")
         if not pid_text.isdigit():
             continue
-        if "--type=" in command or "Google Chrome" not in command:
-            continue
-        if _command_has_profile(command, profile):
+        if _matches_our_command(command, profile):
             found.append(int(pid_text))
     return found
 
 
 def _stop_existing(profile: Path) -> None:
-    for pid in pids_for_profile(profile):
+    profile = assert_locked_profile(profile)
+    windows = sys.platform == "win32"
+    if windows:
+        from activitysim.winchrome import clear_process_cache, request_close
+
+        clear_process_cache()
+    errors: tuple[type[BaseException], ...] = (
+        (ProcessLookupError, OSError) if windows else (ProcessLookupError,)
+    )
+    for pid in pids_for_profile(profile, fresh=windows):
+        try:
+            if not _is_our_process(pid, profile):
+                continue
+            if windows:
+                request_close(pid)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except errors:
+            continue
+    deadline = time.time() + 3
+    while time.time() < deadline and pids_for_profile(profile, fresh=windows):
+        time.sleep(0.1)
+    if not windows:
+        return
+    for pid in pids_for_profile(profile, fresh=True):
         try:
             if _is_our_process(pid, profile):
                 os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except errors:
             continue
-    deadline = time.time() + 3
-    while time.time() < deadline and pids_for_profile(profile):
+    deadline = time.time() + 2
+    while time.time() < deadline and pids_for_profile(profile, fresh=True):
         time.sleep(0.1)
+    clear_process_cache()
 
 
 class Chrome:
@@ -281,9 +450,36 @@ class Chrome:
         self.window_id: str | None = None
         self._process: subprocess.Popen[str] | None = None
         self._ws = ""
+        self._pixel_scale = 1.0
 
     def installed(self) -> bool:
         return chrome_binary() is not None
+
+    def pixel_scale(self) -> float:
+        return self._pixel_scale
+
+    def remember_pixel_scale(self, scale: float) -> None:
+        try:
+            value = float(scale)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            self._pixel_scale = value
+
+    def main_window_is_front(self) -> bool:
+        """False when a dialog of this Chrome is the foreground window.
+
+        macOS uses the accessibility focus instead, so this stays true there.
+        """
+
+        if sys.platform != "win32" or not self.pid:
+            return sys.platform != "win32"
+        from activitysim.winchrome import main_window_is_front as window_is_main
+
+        try:
+            return window_is_main(self.pid)
+        except OSError:
+            return False
 
     def open_window(self, url: str) -> str:
         _require_url(url)
@@ -309,8 +505,9 @@ class Chrome:
             pages = self._wait_for_pages()
             self._ws = str(pages[0].get("webSocketDebuggerUrl") or "")
             self.window_id = str(self.pid)
-            set_chrome_pid(self.pid)
-            enable_web_content(self.pid)
+            if sys.platform != "win32":
+                set_chrome_pid(self.pid)
+                enable_web_content(self.pid)
             call(self._ws, "Page.reload", {})
             self._wait_until_loaded()
             self._enter_fullscreen()
@@ -321,11 +518,26 @@ class Chrome:
 
     def activate(self) -> None:
         self._require_pid()
+        if sys.platform == "win32":
+            from activitysim.winchrome import activate as activate_window
+
+            try:
+                activate_window(self.pid or 0)
+            except OSError as exc:
+                raise ChromeError(str(exc)) from exc
+            return
         run_osascript(script_activate(self.pid or 0))
 
     def is_front(self) -> bool:
         if not self.pid:
             return False
+        if sys.platform == "win32":
+            from activitysim.winchrome import is_front as window_is_front
+
+            try:
+                return window_is_front(self.pid)
+            except OSError:
+                return False
         try:
             front = run_osascript(script_front_pid()).strip()
         except OsaError:
@@ -342,10 +554,32 @@ class Chrome:
         value = result.get("result", {}).get("value", "")
         return value if isinstance(value, str) else ""
 
+    def evaluate(self, expression: str):
+        """Run JavaScript in the signed-out page and return the JSON value."""
+
+        self._require_page()
+        result = call(
+            self._ws,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True},
+        )
+        inner = result.get("result", {})
+        if not isinstance(inner, dict) or inner.get("subtype") == "error":
+            return None
+        return inner.get("value")
+
     def bounds(self) -> tuple[float, float, float, float]:
         self._require_pid()
-        set_chrome_pid(self.pid)
-        frame = content_bounds()
+        if sys.platform == "win32":
+            from activitysim.winchrome import window_bounds
+
+            try:
+                frame = window_bounds(self.pid or 0)
+            except OSError as exc:
+                raise ChromeError(str(exc)) from exc
+        else:
+            set_chrome_pid(self.pid)
+            frame = content_bounds()
         if frame is None:
             raise ChromeError("the signed-out Chrome window is not on screen")
         left, top, right, bottom = frame
@@ -443,6 +677,8 @@ class Chrome:
             time.sleep(0.2)
 
     def _enter_fullscreen(self) -> None:
+        if sys.platform == "win32":
+            return
         try:
             run_osascript(script_fullscreen(self.pid or 0), timeout=8)
             time.sleep(0.4)
