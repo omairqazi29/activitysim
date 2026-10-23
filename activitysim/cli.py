@@ -28,13 +28,14 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac or Windows PC.
 
-This opens a separate signed-out Chrome, searches GitHub without repeating
-the same repositories, and browses public benchmark sites such as DeepSWE,
-ProgramBench, SWE-bench, and Terminal-Bench. It uses each site's nav in a
-random order, opens tasks, and opens a trace when the site has one. Sometimes
-it opens a GPT-6 Astra result. Those are real mouse clicks and keystrokes,
-which is what an idle check looks for. Your signed-in Chrome is not used, so
-the window has no X or GitHub session.
+This opens a separate signed-out Chrome on a random public benchmark site
+such as DeepSWE, ProgramBench, SWE-bench, or Terminal-Bench. GitHub is not
+the first page. Later chapters mix those sites, in random order, with GitHub
+searches and repositories it has not already opened. Each site's nav is
+shuffled. Tasks are opened, and a trace is opened when the site has one.
+Sometimes it opens a GPT-6 Astra result. Those are real mouse clicks and
+keystrokes, which is what an idle check looks for. Your signed-in Chrome is
+not used, so the window has no X or GitHub session.
 
 A normal run prints "launching dev browser" and then stays quiet. If something
 fails, that error is printed instead. --dry-run still prints the session.

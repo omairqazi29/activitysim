@@ -52,18 +52,17 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 
 - Asks for Accessibility if the pointer cannot move yet, opens that Settings
   pane, and waits until the switch is on.
-- Opens one signed-out Chrome window. Your Chrome stays as it was. If that
-  window opens, the program prints `launching dev browser` and then stays quiet.
-- Clicks the search box and types a different GitHub query each time, so the
-  same popular repositories do not stay on screen. Typed characters assume a
-  US keyboard.
-- Clicks repository rows in the results, a few seconds apart. A repository
-  already opened in this session is left again instead of being read twice.
-- Opens other repositories directly, and does not return to one until the
-  rest of the list has been used.
-- Visits DeepSWE, ProgramBench, SWE-bench, Terminal-Bench, LiveCodeBench, and
-  SWE-smith. The nav is used in a random order. Tasks are opened, and a trace
-  is opened when the site has one. Some visits end on a GPT-6 Astra page.
+- Opens one signed-out Chrome window on a random benchmark site. GitHub is
+  not the first page. Your Chrome stays as it was. If that window opens, the
+  program prints `launching dev browser` and then stays quiet.
+- The first site is one of DeepSWE, ProgramBench, SWE-bench, Terminal-Bench,
+  LiveCodeBench, SWE-bench Live, or SWE-smith. Which site comes first depends
+  on the seed. The nav is used in a random order. Tasks are opened, and a
+  trace is opened when the site has one. Some visits end on a GPT-6 Astra page.
+- Later chapters are a random mix of another benchmark site, a GitHub
+  repository, and a GitHub advanced search. The same popular repositories do
+  not stay on screen. A repository already opened in this session is left
+  again instead of being read twice. Typed characters assume a US keyboard.
 - On each page, presses arrow keys, scrolls, and clicks in the page body.
 - Presses Command+Left to go back, then continues.
 

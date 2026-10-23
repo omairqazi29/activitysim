@@ -1,10 +1,10 @@
 """Drive the signed-out Chrome with real pointer and keyboard events.
 
-A session searches GitHub, opens repositories it has not already used, and
-walks public benchmark sites: nav, tasks, traces, and sometimes Astra.
-AppleScript and the debugger only open the window and read the page. The
-clicks and keystrokes are real input. A normal run prints one line when the
-window opens. Errors are printed on their own.
+A session opens a random public benchmark site first. Later chapters mix
+more of those sites with GitHub searches and repositories it has not already
+used. AppleScript and the debugger only open the window and read the page.
+The clicks and keystrokes are real input. A normal run prints one line when
+the window opens. Errors are printed on their own.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ class Runner:
         self._last_pos: tuple[float, float] | None = None
         self._last_front: str | None = None
         self._announced = False
-        self._did_search = False
+        self._started = False
         self._kinds: list[str] = []
         self.mode = "search"
         self.points: list[tuple[float, float]] = []
@@ -146,12 +146,10 @@ class Runner:
                 return
         if not self.browser.installed():
             raise OsaError("Google Chrome is not installed")
-        self.browser.open_window(ADVANCED_URL)
-        self._announce()
         self._last_front = self.frontmost()
-        self.log(f"opened Chrome at {ADVANCED_URL}")
         self.log("signed-out Chrome only. your X and GitHub logins are not in it")
-        self.mode = "search"
+        self._begin_chapter()
+        self._last_pos = self.pointer.position()
         while not self._expired(start):
             self._sleep(self.rng.uniform(self.config.min_gap, self.config.max_gap))
             if self._expired(start):
@@ -172,7 +170,7 @@ class Runner:
         if self.config.dry_run:
             self.log("dry run, nothing will move and Chrome will not open")
         else:
-            self.log("github advanced search, then real clicks through the results")
+            self.log("a random benchmark site first, then GitHub and the other sites")
         self.log("Ctrl+C stops the simulator. power settings are not changed")
         if not self.config.dry_run:
             if sys.platform == "win32":
@@ -237,9 +235,9 @@ class Runner:
         self._begin_chapter()
 
     def _begin_chapter(self) -> None:
-        if not self._did_search:
-            self._did_search = True
-            self._search()
+        if not self._started:
+            self._started = True
+            self._start_tour()
             return
         kind = self._next_kind()
         if kind == "tour":
@@ -317,18 +315,22 @@ class Runner:
         if self.places is not None:
             self.places.leave_page()
         label = page_label(url)
-        point = self._link_point(url)
         opened = False
-        if point is not None and self._click(point, label):
-            self._remember_navigation(url)
-            opened = True
-        elif self.can_keys and can_type(url):
-            self._type_url(url)
+        if not self._window_open():
+            self._open_fresh(url)
             opened = True
         else:
-            self.browser.navigate(url)
-            self._remember_navigation(url)
-            opened = True
+            point = self._link_point(url)
+            if point is not None and self._click(point, label):
+                self._remember_navigation(url)
+                opened = True
+            elif self.can_keys and can_type(url):
+                self._type_url(url)
+                opened = True
+            else:
+                self.browser.navigate(url)
+                self._remember_navigation(url)
+                opened = True
         if self.places is not None:
             self.places.saw_repo(url)
         if opened:
@@ -375,7 +377,9 @@ class Runner:
         self.per_query = self.rng.randint(2, 4)
         self.log(f"github advanced search: {query}")
         self.actions.append("search")
-        if self.can_keys and not self._on_advanced():
+        if not self._window_open():
+            self._open_fresh(ADVANCED_URL)
+        elif self.can_keys and not self._on_advanced():
             self._type_url(ADVANCED_URL)
             self._sleep(self.rng.uniform(1.2, 2.0))
         self._submit_query(query)
@@ -551,6 +555,15 @@ class Runner:
         if sys.platform == "win32" and callable(getattr(self.browser, "main_window_is_front", None)):
             return True
         return self._text_focused()
+
+    def _window_open(self) -> bool:
+        return bool(getattr(self.browser, "window_id", None))
+
+    def _open_fresh(self, url: str) -> None:
+        self.browser.open_window(url)
+        self._announce()
+        self.log(f"opened Chrome at {url}")
+        self._remember_navigation(url)
 
     def _type_url(self, url: str) -> None:
         if not self._arm():
