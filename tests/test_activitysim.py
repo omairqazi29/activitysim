@@ -171,6 +171,20 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
     return runner, browser, pointer, clock
 
 
+def prefer_search(runner: Runner) -> None:
+    """Skip the opening benchmark tour and start on GitHub search."""
+
+    runner._started = True
+    runner._kinds = ["search", "search", "search", "search"]
+
+
+def opened_url(runner: Runner) -> str:
+    for line in runner.history:
+        if line.startswith("opened Chrome at "):
+            return line.split(" ", 3)[-1]
+    raise AssertionError("Chrome was not opened")
+
+
 class GeometryTests(unittest.TestCase):
     def test_tab_strip_stays_off_the_traffic_lights_and_corners(self) -> None:
         bounds = (0.0, 33.0, 1728.0, 1117.0)
@@ -626,20 +640,34 @@ class SearchGeometryTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    def test_session_clicks_results_and_types_the_search(self) -> None:
-        runner, browser, pointer, _clock = make_runner(duration=22, seed=12)
+    def test_session_opens_a_random_benchmark_before_github(self) -> None:
+        homes = {site.home for site in SITES}
+        seen: set[str] = set()
+        for seed in range(8):
+            runner, browser, pointer, _clock = make_runner(duration=8, seed=seed)
+            with redirect_stdout(StringIO()):
+                runner.run()
+            self.assertTrue(browser.window_id)
+            url = opened_url(runner)
+            self.assertIn(url, homes)
+            self.assertFalse(url.startswith("https://github.com/"))
+            seen.add(url)
+            for text in pointer.typed:
+                self.assertNotIn("javascript:", text)
+                self.assertTrue(can_type(text), text)
+                if "://" in text:
+                    self.assertTrue(allowed_url(text), text)
+            for key, mods in pointer.keys:
+                self.assertNotIn(key, {"q", "w", "space"})
+                if key.isdigit() or key == "a":
+                    self.assertIn("command", mods)
+        self.assertGreater(len(seen), 1)
+
+        runner, browser, pointer, _clock = make_runner(duration=400, seed=12)
         with redirect_stdout(StringIO()):
             runner.run()
-        self.assertTrue(browser.window_id)
-        self.assertTrue(pointer.typed)
-        for text in pointer.typed:
-            self.assertNotIn("javascript:", text)
-            self.assertTrue(can_type(text), text)
-            if "://" in text:
-                self.assertTrue(allowed_url(text), text)
-            else:
-                self.assertTrue(text.startswith("language:"), text)
-        self.assertGreater(len(pointer.clicks), 0)
+        self.assertFalse(opened_url(runner).startswith("https://github.com/"))
+        self.assertTrue(any("advanced search" in line for line in runner.history))
         self.assertIn("result", runner.actions)
         for point in pointer.clicks:
             self.assertTrue(
@@ -648,11 +676,6 @@ class RunnerTests(unittest.TestCase):
                 or in_readme_zone(point, browser.bounds_value),
                 point,
             )
-        for key, mods in pointer.keys:
-            self.assertNotIn(key, {"q", "w", "space"})
-            if key.isdigit() or key == "a":
-                self.assertIn("command", mods)
-        self.assertTrue(any("advanced search" in line for line in runner.history))
 
     def test_without_accessibility_does_not_pretend_to_run(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=18, ready=False, seed=4)
@@ -779,6 +802,7 @@ class RunnerTests(unittest.TestCase):
         self.assertGreaterEqual(len(set(repos)), 2, repos)
 
         runner, browser, pointer, _clock = make_runner(duration=4, seed=1)
+        browser.open_window("https://deepswe.datacurve.ai/")
         runner.can_point = True
         runner.can_keys = True
         runner.find_link = lambda _url: (220.0, 240.0)
@@ -788,7 +812,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(browser.current_url(), "https://deepswe.datacurve.ai/blog")
         self.assertTrue(any("click nav" in line for line in runner.history))
 
-        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner, browser, pointer, _clock = make_runner(duration=4, seed=1)
+        browser.open_window("https://deepswe.datacurve.ai/")
         runner.can_point = True
         runner.can_keys = True
         runner.find_link = lambda _url: (1.0, 1.0)
@@ -826,9 +851,11 @@ class CliTests(unittest.TestCase):
                 "--min-gap", "1", "--max-gap", "1",
             ])
         self.assertEqual(code, 0)
-        self.assertIn("dry run", stdout.getvalue())
-        self.assertIn("advanced search", stdout.getvalue())
-        self.assertIn("click", stdout.getvalue())
+        text = stdout.getvalue()
+        self.assertIn("dry run", text)
+        self.assertIn("click", text)
+        self.assertIn("opened Chrome at ", text)
+        self.assertNotIn("opened Chrome at https://github.com/", text)
 
     def test_help_and_bad_url_file(self) -> None:
         stdout = StringIO()
@@ -1712,6 +1739,7 @@ class WindowAndInputTests(unittest.TestCase):
 
     def test_finder_and_focus_drive_the_runner(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=25, seed=12)
+        prefer_search(runner)
         wanted = [(500.0, 400.0), (520.0, 500.0)]
         runner.find_results = lambda _bounds: list(wanted)
         runner.find_search_box = lambda _bounds: (400.0, 200.0)
@@ -1724,6 +1752,7 @@ class WindowAndInputTests(unittest.TestCase):
             self.assertNotIn(point, pointer.clicks)
 
         runner, browser, pointer, _clock = make_runner(duration=25, seed=12)
+        prefer_search(runner)
         runner.find_results = lambda _bounds: [(500.0, 400.0)]
         with redirect_stdout(StringIO()):
             runner.run()
@@ -1731,12 +1760,14 @@ class WindowAndInputTests(unittest.TestCase):
         self.assertTrue(any(point in pointer.clicks for point in result_points(browser.bounds_value)))
 
         runner, _browser, pointer, _clock = make_runner(duration=25, seed=12)
+        prefer_search(runner)
         runner.find_results = lambda _bounds: [(10.0, 10.0), (12.0, 12.0)]
         with redirect_stdout(StringIO()):
             runner.run()
         self.assertNotIn((10.0, 10.0), pointer.clicks)
 
         runner, browser, pointer, _clock = make_runner(duration=25, seed=12)
+        prefer_search(runner)
 
         def boom(_bounds):
             raise OSError("no tree")
@@ -1751,6 +1782,7 @@ class WindowAndInputTests(unittest.TestCase):
         self.assertIn(box, pointer.clicks)
 
         runner, browser, pointer, _clock = make_runner(duration=20, seed=3)
+        prefer_search(runner)
         browser.pixel_scale = lambda: 2.0
         self.assertFalse(in_search_zone((400.0, 400.0), browser.bounds_value, 1))
         self.assertTrue(in_search_zone((400.0, 400.0), browser.bounds_value, 2))
@@ -1774,6 +1806,7 @@ class WindowAndInputTests(unittest.TestCase):
         self.assertNotEqual(measured.scale, 1)
 
         runner, browser, pointer, _clock = make_runner(duration=25, seed=12)
+        prefer_search(runner)
         browser.pixel_scale = lambda: measured.scale
         runner.find_search_box = lambda _bounds: None
         runner.find_results = lambda _bounds: []
@@ -1800,6 +1833,7 @@ class WindowAndInputTests(unittest.TestCase):
 
         def clicks_at(scale: float) -> list[tuple[float, float]]:
             again, host, hand, _clock = make_runner(duration=25, seed=12)
+            prefer_search(again)
             host.pixel_scale = lambda: scale
             again.find_results = lambda _bounds: [low, *kept]
             with redirect_stdout(StringIO()):
@@ -1842,7 +1876,7 @@ class WindowAndInputTests(unittest.TestCase):
             browser.main_window_is_front = lambda: front
             with redirect_stdout(StringIO()):
                 self.assertTrue(runner._prepare_input())
-                runner._step()
+                runner._search()
             return pointer
 
         blocked = step_off_advanced(False)
