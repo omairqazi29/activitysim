@@ -63,7 +63,9 @@ from activitysim.input import (
     can_type,
 )
 from activitysim.osa import OsaError, as_text
-from activitysim.places import Places, load_url_file, safe_url
+from activitysim.browse import locate_link
+from activitysim.places import REPOS, Places, load_url_file, safe_url
+from activitysim.sites import ASTRA, DEEPSWE, SITES, Catalog, allowed_url
 from activitysim.runner import Config, Runner
 from activitysim.winchrome import (
     AWAKE_FLAGS,
@@ -119,6 +121,7 @@ from activitysim.winpage import (
 )
 from activitysim.search import (
     QUERIES,
+    QueryDeck,
     accept_result,
     bad_label,
     content_frame,
@@ -271,6 +274,34 @@ class PlaceTests(unittest.TestCase):
     def test_extra_urls_are_filtered(self) -> None:
         places = Places(random.Random(0), ["javascript:alert(1)", "https://example.com/a"])
         self.assertEqual(places.extra, ["https://example.com/a"])
+
+    def test_repo_list_is_unique_and_typable(self) -> None:
+        folded = [repo.lower() for repo in REPOS]
+        self.assertEqual(len(folded), len(set(folded)))
+        self.assertGreater(len(REPOS), 100)
+        for repo in REPOS:
+            url = f"https://github.com/{repo}"
+            self.assertTrue(can_type(url), url)
+            self.assertTrue(safe_url(url), url)
+
+    def test_repo_bursts_do_not_repeat_until_the_list_is_used(self) -> None:
+        places = Places(random.Random(9), [])
+        names = []
+        for _ in range(40):
+            burst = places.repo_burst()
+            name = urllib.parse.urlsplit(burst[0]).path.strip("/")
+            self.assertEqual(name.count("/"), 1)
+            self.assertGreaterEqual(len(burst), 2)
+            names.append(name.lower())
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_a_repeat_visit_is_recognized(self) -> None:
+        places = Places(random.Random(1), [])
+        first = places.repo_burst()[0]
+        self.assertFalse(places.saw_repo(first))
+        places.leave_page()
+        places.plan_repo(None)
+        self.assertTrue(places.saw_repo(first))
 
 
 class LockedChromeTests(unittest.TestCase):
@@ -475,6 +506,80 @@ class SearchGeometryTests(unittest.TestCase):
             self.assertTrue(safe_url(url), url)
             self.assertNotIn(" ", url)
 
+    def test_query_deck_does_not_repeat_a_query(self) -> None:
+        deck = QueryDeck(random.Random(4))
+        got = [deck.next() for _ in range(36)]
+        self.assertEqual(len(got), len(set(got)))
+        for query in got:
+            self.assertTrue(query.startswith("language:"), query)
+            self.assertTrue(can_type(query), query)
+            self.assertTrue(can_type(results_url(query)), query)
+            self.assertNotIn("stars:>1000", query)
+
+    def test_benchmark_pages_are_safe_to_type(self) -> None:
+        seen = []
+        for site in SITES:
+            for url in (site.home, *site.nav, *site.tasks, *site.traces):
+                self.assertTrue(allowed_url(url), url)
+                seen.append(url)
+        for url in ASTRA:
+            self.assertTrue(allowed_url(url), url)
+        self.assertGreater(len(DEEPSWE.tasks), 100)
+        self.assertTrue(DEEPSWE.traces)
+
+    def test_nav_order_and_tasks_change_between_visits(self) -> None:
+        orders = set()
+        for seed in range(12):
+            catalog = Catalog(random.Random(seed))
+            urls = catalog.tour(DEEPSWE)
+            nav = tuple(url for url in urls if url in DEEPSWE.nav)
+            orders.add(nav)
+            self.assertTrue(any("/trials/" in url for url in urls), urls)
+        self.assertGreater(len(orders), 1)
+
+        catalog = Catalog(random.Random(2))
+        first = catalog.tour(DEEPSWE)
+        second = catalog.tour(DEEPSWE)
+
+        def tasks(urls: list[str]) -> set[str]:
+            found = set()
+            for url in urls:
+                if "/tasks/" in url and not url.rstrip("/").endswith("/tasks"):
+                    found.add(url)
+            return found
+
+        self.assertTrue(tasks(first))
+        self.assertTrue(tasks(first).isdisjoint(tasks(second)))
+        both = first + second + catalog.tour() + catalog.tour()
+        self.assertTrue(any("gpt-6-astra" in url for url in both))
+
+    def test_a_visible_link_becomes_a_window_point(self) -> None:
+        class Page:
+            def bounds(self):
+                return (0.0, 100.0, 1000.0, 900.0)
+
+            def evaluate(self, _expression):
+                return {
+                    "outerWidth": 1000,
+                    "outerHeight": 800,
+                    "innerWidth": 1000,
+                    "innerHeight": 800,
+                    "left": 100,
+                    "top": 40,
+                    "width": 80,
+                    "height": 20,
+                }
+
+        point = locate_link(Page(), "https://deepswe.datacurve.ai/blog")
+        self.assertEqual(point, (140.0, 150.0))
+        self.assertIsNone(locate_link(Page(), "javascript:alert(1)"))
+
+        class Empty(Page):
+            def evaluate(self, _expression):
+                return None
+
+        self.assertIsNone(locate_link(Empty(), "https://deepswe.datacurve.ai/blog"))
+
     def test_result_points_avoid_the_star_column(self) -> None:
         points = result_points(self.bounds)
         self.assertGreaterEqual(len(points), 3)
@@ -528,11 +633,12 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(browser.window_id)
         self.assertTrue(pointer.typed)
         for text in pointer.typed:
-            self.assertTrue(
-                text in QUERIES or text.startswith("https://github.com/search"),
-                text,
-            )
             self.assertNotIn("javascript:", text)
+            self.assertTrue(can_type(text), text)
+            if "://" in text:
+                self.assertTrue(allowed_url(text), text)
+            else:
+                self.assertTrue(text.startswith("language:"), text)
         self.assertGreater(len(pointer.clicks), 0)
         self.assertIn("result", runner.actions)
         for point in pointer.clicks:
@@ -614,6 +720,82 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("paused") for line in runner.history))
         self.assertEqual(pointer.clicks, [])
         self.assertEqual(pointer.typed, [])
+
+    def test_real_run_prints_only_the_launch_line(self) -> None:
+        runner, _browser, _pointer, _clock = make_runner(duration=8, seed=2)
+        runner.config.dry_run = False
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            runner.run()
+        self.assertEqual(stdout.getvalue(), "launching dev browser\n")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_a_failed_launch_does_not_print_the_launch_line(self) -> None:
+        runner, browser, _pointer, _clock = make_runner(duration=8, seed=2)
+        runner.config.dry_run = False
+        browser.installed = lambda: False
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(OsaError):
+                runner.run()
+        self.assertNotIn("launching dev browser", stdout.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+
+        runner, _browser, _pointer, _clock = make_runner(duration=6, ready=False, seed=2)
+        runner.config.dry_run = False
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            runner.run()
+        self.assertNotIn("launching dev browser", stdout.getvalue())
+        self.assertIn("Accessibility", stderr.getvalue())
+
+    def test_later_chapters_open_benchmarks_and_fresh_repos(self) -> None:
+        runner, browser, pointer, _clock = make_runner(duration=160, seed=3)
+        runner._kinds = ["repo", "tour", "repo"]
+        with redirect_stdout(StringIO()):
+            runner.run()
+        text = "\n".join(runner.history)
+        hosts = (
+            "deepswe.datacurve.ai",
+            "programbench.com",
+            "swebench.com",
+            "tbench.ai",
+            "livecodebench.github.io",
+            "swe-bench-live.github.io",
+            "swesmith.com",
+        )
+        self.assertTrue(any(host in text for host in hosts), text)
+        repos = []
+        for line in runner.history:
+            if "github.com/" not in line or "/search" in line:
+                continue
+            path = urllib.parse.urlsplit(line.split(" ", 1)[-1]).path.strip("/")
+            parts = path.split("/")
+            if len(parts) >= 2:
+                repos.append(f"{parts[0]}/{parts[1]}".lower())
+        self.assertGreaterEqual(len(set(repos)), 2, repos)
+
+        runner, browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        runner.find_link = lambda _url: (220.0, 240.0)
+        with redirect_stdout(StringIO()):
+            runner._visit("https://deepswe.datacurve.ai/blog")
+        self.assertIn((220.0, 240.0), pointer.clicks)
+        self.assertEqual(browser.current_url(), "https://deepswe.datacurve.ai/blog")
+        self.assertTrue(any("click nav" in line for line in runner.history))
+
+        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        runner.find_link = lambda _url: (1.0, 1.0)
+        with redirect_stdout(StringIO()):
+            runner._visit("https://deepswe.datacurve.ai/run")
+        self.assertNotIn((1.0, 1.0), pointer.clicks)
+        self.assertIn("https://deepswe.datacurve.ai/run", pointer.typed)
 
 
 class CliTests(unittest.TestCase):
@@ -1631,7 +1813,7 @@ class WindowAndInputTests(unittest.TestCase):
         runner.focused_role = lambda: "button"
         with redirect_stdout(StringIO()):
             runner.run()
-        self.assertFalse(any(text in QUERIES for text in pointer.typed))
+        self.assertFalse(any(text.startswith("language:") for text in pointer.typed))
         self.assertTrue(any(line.startswith("open ") for line in runner.history))
 
         original = sys.platform
@@ -1647,7 +1829,7 @@ class WindowAndInputTests(unittest.TestCase):
             browser.main_window_is_front = lambda: False
             with redirect_stdout(StringIO()):
                 runner.run()
-            self.assertFalse(any(text in QUERIES for text in pointer.typed))
+            self.assertFalse(any(text.startswith("language:") for text in pointer.typed))
         finally:
             sys.platform = original
 

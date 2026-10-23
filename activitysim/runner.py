@@ -1,8 +1,10 @@
-"""Drive GitHub advanced search with real pointer and keyboard events.
+"""Drive the signed-out Chrome with real pointer and keyboard events.
 
-Each step clicks or types. AppleScript is only used to open the window and to
-read the current URL. Activity checks that ignore synthetic-looking browser
-automation still see mouse-down, mouse-up, and key events.
+A session searches GitHub, opens repositories it has not already used, and
+walks public benchmark sites: nav, tasks, traces, and sometimes Astra.
+AppleScript and the debugger only open the window and read the page. The
+clicks and keystrokes are real input. A normal run prints one line when the
+window opens. Errors are printed on their own.
 """
 
 from __future__ import annotations
@@ -12,12 +14,12 @@ import sys
 import time
 from dataclasses import dataclass
 
-from activitysim.geom import pointer_moved, user_left_chrome
+from activitysim.geom import away_from_hot_corners, pointer_moved, user_left_chrome
 from activitysim.input import can_type
 from activitysim.osa import OsaError
 from activitysim.search import (
     ADVANCED_URL,
-    QUERIES,
+    QueryDeck,
     in_readme_zone,
     in_result_zone,
     in_search_zone,
@@ -27,8 +29,15 @@ from activitysim.search import (
     results_url,
     search_box_point,
 )
+from activitysim.sites import Catalog, allowed_url, page_label
 
 TEXT_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"})
+
+
+def _in_window(point: tuple[float, float], bounds: tuple[float, float, float, float]) -> bool:
+    x, y = point
+    left, top, right, bottom = bounds
+    return (left + 8) <= x <= (right - 8) and (top + 8) <= y <= (bottom - 8)
 
 
 @dataclass
@@ -60,6 +69,7 @@ class Runner:
         focused_role=None,
         find_search_box=None,
         find_results=None,
+        find_link=None,
     ) -> None:
         self.config = config
         self.browser = browser
@@ -72,26 +82,46 @@ class Runner:
         self.focused_role = focused_role
         self.find_search_box = find_search_box
         self.find_results = find_results
+        self.find_link = find_link
+        self.queries = QueryDeck(self.rng)
+        self.catalog = Catalog(self.rng)
         self.history: list[str] = []
         self.actions: list[str] = []
         self.can_point = False
         self.can_keys = False
         self._last_pos: tuple[float, float] | None = None
         self._last_front: str | None = None
+        self._announced = False
+        self._did_search = False
+        self._kinds: list[str] = []
         self.mode = "search"
         self.points: list[tuple[float, float]] = []
         self.pi = 0
         self.per_query = 4
         self.reads_left = 0
         self.results_url = ""
+        self.tour_urls: list[str] = []
+        self.tour_i = 0
+        self.tour_phase = "open"
+        self.tour_reads = 0
+        self.repo_urls: list[str] = []
+        self.repo_i = 0
+        self.repo_phase = "open"
+        self.repo_reads = 0
 
-    def log(self, message: str) -> None:
-        if self.config.dry_run:
-            stamp = f"t+{self.clock():6.1f}s"
-        else:
-            stamp = time.strftime("%H:%M:%S")
-        print(f"{stamp}  {message}", flush=True)
+    def log(self, message: str, *, error: bool = False) -> None:
         self.history.append(message)
+        if self.config.dry_run:
+            print(f"t+{self.clock():6.1f}s  {message}", flush=True)
+            return
+        if error:
+            print(message, file=sys.stderr, flush=True)
+
+    def _announce(self) -> None:
+        if self.config.dry_run or self._announced:
+            return
+        self._announced = True
+        print("launching dev browser", flush=True)
 
     def run(self) -> None:
         try:
@@ -117,6 +147,7 @@ class Runner:
         if not self.browser.installed():
             raise OsaError("Google Chrome is not installed")
         self.browser.open_window(ADVANCED_URL)
+        self._announce()
         self._last_front = self.frontmost()
         self.log(f"opened Chrome at {ADVANCED_URL}")
         self.log("signed-out Chrome only. your X and GitHub logins are not in it")
@@ -131,7 +162,7 @@ class Runner:
             try:
                 self._step()
             except (OsaError, OSError, ValueError) as exc:
-                self.log(f"step failed: {exc}")
+                self.log(f"step failed: {exc}", error=True)
             self._note_front()
             self._remember()
         self.log("duration elapsed")
@@ -156,18 +187,27 @@ class Runner:
         self.can_point = bool(self.pointer.available())
         if not self.can_point:
             if sys.platform == "win32":
-                self.log("the pointer could not be moved")
-                self.log("this process must be the interactive user, not Administrator")
+                self.log("the pointer could not be moved", error=True)
+                self.log(
+                    "this process must be the interactive user, not Administrator",
+                    error=True,
+                )
             else:
-                self.log("Accessibility is required for real mouse and keyboard clicks")
+                self.log(
+                    "Accessibility is required for real mouse and keyboard clicks",
+                    error=True,
+                )
             ask = getattr(self.pointer, "request_access", None)
             if ask and ask():
                 self.can_point = bool(self.pointer.available())
         if not self.can_point:
             if sys.platform == "win32":
-                self.log("stopped. the pointer could not be moved")
+                self.log("stopped. the pointer could not be moved", error=True)
             else:
-                self.log("stopped. no Accessibility permission, so clicks would not happen")
+                self.log(
+                    "stopped. no Accessibility permission, so clicks would not happen",
+                    error=True,
+                )
             return False
         self.can_keys = self.can_point and not self.config.no_keyboard and not self.config.mouse_only
         if self.can_keys:
@@ -185,14 +225,154 @@ class Runner:
                 self._back()
                 self.mode = "results"
             return
-        if self.mode == "results" and self.pi < min(len(self.points), self.per_query):
+        if self.mode == "tour":
+            if self._tour_continues():
+                return
+        elif self.mode == "repo":
+            if self._repo_continues():
+                return
+        elif self.mode == "results" and self.pi < min(len(self.points), self.per_query):
             self._open_result()
             return
-        self._search()
+        self._begin_chapter()
+
+    def _begin_chapter(self) -> None:
+        if not self._did_search:
+            self._did_search = True
+            self._search()
+            return
+        kind = self._next_kind()
+        if kind == "tour":
+            self._start_tour()
+        elif kind == "repo":
+            self._start_repo()
+        else:
+            self._search()
+
+    def _next_kind(self) -> str:
+        if not self._kinds:
+            kinds = ["tour", "repo", "tour", "repo", "search"]
+            self.rng.shuffle(kinds)
+            self._kinds = kinds
+        return self._kinds.pop()
+
+    def _start_tour(self) -> None:
+        if self.places is not None:
+            self.places.leave_page()
+            self.places.plan_repo(None)
+        self.tour_urls = self.catalog.tour()
+        self.tour_i = 0
+        self.tour_phase = "open"
+        self.tour_reads = 0
+        self.mode = "tour"
+        if not self.tour_urls:
+            self._search()
+            return
+        self._tour_continues()
+
+    def _tour_continues(self) -> bool:
+        if self.tour_phase == "read" and self.tour_reads > 0:
+            self._read()
+            self.tour_reads -= 1
+            if self.tour_reads == 0:
+                self.tour_i += 1
+                self.tour_phase = "open"
+            return True
+        if self.tour_i >= len(self.tour_urls):
+            return False
+        self._visit(self.tour_urls[self.tour_i])
+        self.tour_reads = self.rng.randint(1, 2)
+        self.tour_phase = "read"
+        return True
+
+    def _start_repo(self) -> None:
+        if self.places is None:
+            self._search()
+            return
+        self.repo_urls = self.places.repo_burst()
+        self.repo_i = 0
+        self.repo_phase = "open"
+        self.repo_reads = 0
+        self.mode = "repo"
+        self._repo_continues()
+
+    def _repo_continues(self) -> bool:
+        if self.repo_phase == "read" and self.repo_reads > 0:
+            self._read()
+            self.repo_reads -= 1
+            if self.repo_reads == 0:
+                self.repo_i += 1
+                self.repo_phase = "open"
+            return True
+        if self.repo_i >= len(self.repo_urls):
+            return False
+        self._visit(self.repo_urls[self.repo_i])
+        self.repo_reads = self.rng.randint(1, 2)
+        self.repo_phase = "read"
+        return True
+
+    def _visit(self, url: str) -> None:
+        if not allowed_url(url):
+            raise ValueError(f"refusing to open {url!r}")
+        if self.places is not None:
+            self.places.leave_page()
+        label = page_label(url)
+        point = self._link_point(url)
+        opened = False
+        if point is not None and self._click(point, label):
+            self._remember_navigation(url)
+            opened = True
+        elif self.can_keys and can_type(url):
+            self._type_url(url)
+            opened = True
+        else:
+            self.browser.navigate(url)
+            self._remember_navigation(url)
+            opened = True
+        if self.places is not None:
+            self.places.saw_repo(url)
+        if opened:
+            self.actions.append("visit")
+            self.log(f"open {url}")
+        self._sleep(self.rng.uniform(1.0, 1.8))
+
+    def _link_point(self, url: str) -> tuple[float, float] | None:
+        if self.find_link is None:
+            return None
+        try:
+            found = self.find_link(url)
+        except (OSError, OsaError, ValueError, TypeError, RuntimeError):
+            return None
+        if not found or len(found) != 2:
+            return None
+        try:
+            point = (float(found[0]), float(found[1]))
+        except (TypeError, ValueError):
+            return None
+        bounds = self._bounds()
+        if bounds is None or not _in_window(point, bounds):
+            return None
+        displays = self._displays()
+        if displays and not away_from_hot_corners(point, displays):
+            return None
+        return point
+
+    def _displays(self) -> list[tuple[float, float, float, float]]:
+        getter = getattr(self.pointer, "displays", None)
+        if not callable(getter):
+            return []
+        try:
+            found = getter() or []
+        except (OSError, ValueError, TypeError):
+            return []
+        return list(found)
 
     def _search(self) -> None:
-        query = self.rng.choice(QUERIES)
-        self.per_query = self.rng.randint(3, 5)
+        if self.places is not None:
+            self.places.leave_page()
+            self.places.plan_repo(None)
+        query = self.queries.next()
+        self.per_query = self.rng.randint(2, 4)
         self.log(f"github advanced search: {query}")
         self.actions.append("search")
         if self.can_keys and not self._on_advanced():
@@ -248,6 +428,10 @@ class Runner:
         self.mode = "item"
 
     def _read(self) -> None:
+        if self.places is not None and self.places.saw_repo(self._current_url()):
+            self.reads_left = 0
+            self.log("skip a repo already open")
+            return
         self.actions.append("read")
         if self.can_keys and self._arm():
             key = self.rng.choice(["down", "down", "pagedown", "up"])
@@ -275,6 +459,8 @@ class Runner:
             self.log("scroll the result")
 
     def _back(self) -> None:
+        if self.places is not None:
+            self.places.leave_page()
         self.actions.append("back")
         if self.can_keys and self._arm():
             self.pointer.hotkey("left", ("command",))

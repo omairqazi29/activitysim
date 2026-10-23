@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from activitysim import __version__
+from activitysim.browse import locate_link
 from activitysim.chrome import Chrome, find_chrome
 from activitysim.fakes import FakeBrowser, FakeClock, FakePointer
 from activitysim.ax import focused_role, result_clicks, search_field
@@ -27,10 +28,16 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac or Windows PC.
 
-This opens a separate signed-out Chrome on GitHub advanced search, types a
-query, and clicks through the repository results. Those are real mouse clicks
-and keystrokes, which is what an idle check looks for. Your signed-in Chrome
-is not used, so the window has no X or GitHub session.
+This opens a separate signed-out Chrome, searches GitHub without repeating
+the same repositories, and browses public benchmark sites such as DeepSWE,
+ProgramBench, SWE-bench, and Terminal-Bench. It uses each site's nav in a
+random order, opens tasks, and opens a trace when the site has one. Sometimes
+it opens a GPT-6 Astra result. Those are real mouse clicks and keystrokes,
+which is what an idle check looks for. Your signed-in Chrome is not used, so
+the window has no X or GitHub session.
+
+A normal run prints "launching dev browser" and then stays quiet. If something
+fails, that error is printed instead. --dry-run still prints the session.
 
 On a Mac, if Accessibility is off, macOS is prompted and System Settings opens.
 The run waits until the switch is on. Without that permission it stops, because
@@ -110,7 +117,7 @@ def is_elevated() -> bool:
 def build_run_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="activitysim run",
-        description="Open a full screen Chrome window and look busy inside it.",
+        description="Open a signed-out Chrome window and look busy inside it.",
     )
     parser.add_argument(
         "--for",
@@ -302,6 +309,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 focused_role=lambda: focused_role_from(browser),
                 find_search_box=lambda bounds: search_field_from(browser, bounds),
                 find_results=lambda bounds: result_clicks_from(browser, bounds),
+                find_link=lambda url: locate_link(browser, url),
             )
         else:
             browser = Chrome()
@@ -316,6 +324,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 focused_role=focused_role,
                 find_search_box=search_field,
                 find_results=result_clicks,
+                find_link=lambda url: locate_link(browser, url),
             )
         runner.run()
         return 0
