@@ -114,21 +114,26 @@ def _height(bounds: Rect) -> float:
     return bounds[3] - bounds[1]
 
 
-def in_search_zone(point: Point, bounds: Rect) -> bool:
+def in_search_zone(point: Point, bounds: Rect, scale: float = 1.0) -> bool:
+    """Search band under the toolbar. scale is physical pixels per CSS pixel."""
+
     x, y = point
     left, top, right, _bottom = bounds
-    return (left + 60) <= x <= (right - 60) and (top + 110) <= y <= (top + 280)
+    return (
+        (left + 60 * scale) <= x <= (right - 60 * scale)
+        and (top + 110 * scale) <= y <= (top + 280 * scale)
+    )
 
 
-def in_result_zone(point: Point, bounds: Rect) -> bool:
+def in_result_zone(point: Point, bounds: Rect, scale: float = 1.0) -> bool:
     """Repository titles. Stars sit further right, past 62% of the window."""
 
     x, y = point
     left, top, _right, bottom = bounds
     width = _width(bounds)
     return (
-        (left + max(120.0, width * 0.18)) <= x <= (left + width * 0.62)
-        and (top + 160) <= y <= (bottom - 40)
+        (left + max(120.0 * scale, width * 0.18)) <= x <= (left + width * 0.62)
+        and (top + 160 * scale) <= y <= (bottom - 40 * scale)
     )
 
 
@@ -149,39 +154,40 @@ def content_frame(windows: list[Rect]) -> Rect | None:
     return best
 
 
-def in_readme_zone(point: Point, bounds: Rect) -> bool:
+def in_readme_zone(point: Point, bounds: Rect, scale: float = 1.0) -> bool:
     x, y = point
     left, top, right, bottom = bounds
     width = _width(bounds)
     height = _height(bounds)
     return (
-        (left + 80) <= x <= (left + width * 0.62)
-        and (top + height * 0.38) <= y <= (bottom - 70)
+        (left + 80 * scale) <= x <= (left + width * 0.62)
+        and (top + height * 0.38) <= y <= (bottom - 70 * scale)
     )
 
 
-def search_box_point(bounds: Rect) -> Point | None:
+def search_box_point(bounds: Rect, scale: float = 1.0) -> Point | None:
     left, top, right, _bottom = bounds
-    point = (left + _width(bounds) * 0.42, top + 175)
-    if in_search_zone(point, bounds):
+    point = (left + _width(bounds) * 0.42, top + 175 * scale)
+    if in_search_zone(point, bounds, scale):
         return point
     return None
 
 
-def result_points(bounds: Rect, count: int = 6) -> list[Point]:
+def result_points(bounds: Rect, count: int = 6, scale: float = 1.0) -> list[Point]:
     left, top, _right, bottom = bounds
     x = left + _width(bounds) * 0.50
-    y = top + 310
+    y = top + 310 * scale
     points: list[Point] = []
-    while len(points) < count and y <= bottom - 40:
+    limit = bottom - 40 * scale
+    while len(points) < count and y <= limit:
         point = (x, y)
-        if in_result_zone(point, bounds):
+        if in_result_zone(point, bounds, scale):
             points.append(point)
-        y += 96
+        y += 96 * scale
     return points
 
 
-def readme_point(bounds: Rect, rng: random.Random) -> Point | None:
+def readme_point(bounds: Rect, rng: random.Random, scale: float = 1.0) -> Point | None:
     left, top, _right, bottom = bounds
     width = _width(bounds)
     height = _height(bounds)
@@ -189,14 +195,14 @@ def readme_point(bounds: Rect, rng: random.Random) -> Point | None:
         left + width * rng.uniform(0.36, 0.55),
         top + height * rng.uniform(0.48, 0.72),
     )
-    if in_readme_zone(point, bounds) and point[1] < bottom - 70:
+    if in_readme_zone(point, bounds, scale) and point[1] < bottom - 70 * scale:
         return point
     return None
 
 
-def accept_result(url: str, title: str, point: Point, bounds: Rect) -> bool:
+def accept_result(url: str, title: str, point: Point, bounds: Rect, scale: float = 1.0) -> bool:
     if bad_label(title) or bad_label(url):
         return False
     if not is_result_href(url):
         return False
-    return in_result_zone(point, bounds)
+    return in_result_zone(point, bounds, scale)

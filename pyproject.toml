@@ -1,12 +1,12 @@
 [project]
 name = "activitysim"
 version = "0.1.0"
-description = "macOS activity simulator that browses public pages and moves the pointer."
+description = "Activity simulator for macOS and Windows that browses public pages and moves the pointer."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "activitysim contributors" }]
-keywords = ["macos", "automation", "activity", "chrome"]
+keywords = ["macos", "windows", "automation", "activity", "chrome"]
 
 [project.scripts]
 activitysim = "activitysim.cli:main"

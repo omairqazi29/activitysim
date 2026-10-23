@@ -8,6 +8,7 @@ automation still see mouse-down, mouse-up, and key events.
 from __future__ import annotations
 
 import random
+import sys
 import time
 from dataclasses import dataclass
 
@@ -143,17 +144,30 @@ class Runner:
             self.log("github advanced search, then real clicks through the results")
         self.log("Ctrl+C stops the simulator. power settings are not changed")
         if not self.config.dry_run:
-            self.log("keep the machine awake separately: sudo pmset -a disablesleep 1")
+            if sys.platform == "win32":
+                self.log(
+                    "--caffeinate keeps the machine awake until exit. "
+                    "power settings are not changed"
+                )
+            else:
+                self.log("keep the machine awake separately: sudo pmset -a disablesleep 1")
 
     def _prepare_input(self) -> bool:
         self.can_point = bool(self.pointer.available())
         if not self.can_point:
-            self.log("Accessibility is required for real mouse and keyboard clicks")
+            if sys.platform == "win32":
+                self.log("the pointer could not be moved")
+                self.log("this process must be the interactive user, not Administrator")
+            else:
+                self.log("Accessibility is required for real mouse and keyboard clicks")
             ask = getattr(self.pointer, "request_access", None)
             if ask and ask():
                 self.can_point = bool(self.pointer.available())
         if not self.can_point:
-            self.log("stopped. no Accessibility permission, so clicks would not happen")
+            if sys.platform == "win32":
+                self.log("stopped. the pointer could not be moved")
+            else:
+                self.log("stopped. no Accessibility permission, so clicks would not happen")
             return False
         self.can_keys = self.can_point and not self.config.no_keyboard and not self.config.mouse_only
         if self.can_keys:
@@ -199,6 +213,7 @@ class Runner:
         if (
             clicked
             and self._text_focused()
+            and not self._popup_blocks_keys()
             and self.can_keys
             and can_type(query)
             and self._our_window_is_front()
@@ -223,7 +238,7 @@ class Runner:
         bounds = self._bounds()
         point = self.points[self.pi]
         self.pi += 1
-        if bounds is None or not in_result_zone(point, bounds):
+        if bounds is None or not in_result_zone(point, bounds, self._pixel_scale()):
             self.log("skipped a result outside the list column")
             return
         self.actions.append("result")
@@ -247,12 +262,13 @@ class Runner:
         bounds = self._bounds()
         if bounds is None or not self.can_point:
             return
+        scale = self._pixel_scale()
         if self.rng.random() < 0.5:
-            point = readme_point(bounds, self.rng)
-            if point is not None and in_readme_zone(point, bounds):
+            point = readme_point(bounds, self.rng, scale)
+            if point is not None and in_readme_zone(point, bounds, scale):
                 self._click(point, "inside the result")
                 return
-        hover = readme_point(bounds, self.rng)
+        hover = readme_point(bounds, self.rng, scale)
         if hover is not None:
             self.pointer.move_to(*hover)
             self.pointer.scroll(self.rng.choice([3, 4, 5, -2]))
@@ -280,9 +296,10 @@ class Runner:
                 found = [tuple(point) for point in (self.find_results(bounds) or [])]
             except (OSError, OsaError, ValueError, TypeError):
                 found = []
-        found = [point for point in found if in_result_zone(point, bounds)]
+        scale = self._pixel_scale()
+        found = [point for point in found if in_result_zone(point, bounds, scale)]
         if len(found) < 2:
-            found = result_points(bounds)
+            found = result_points(bounds, scale=scale)
         return found[:8]
 
     def _search_box(self) -> tuple[float, float] | None:
@@ -294,10 +311,12 @@ class Runner:
                 point = self.find_search_box(bounds)
             except (OSError, OsaError, ValueError, TypeError):
                 point = None
-            if point and in_search_zone(tuple(point), bounds):
+            scale = self._pixel_scale()
+            if point and in_search_zone(tuple(point), bounds, scale):
                 return tuple(point)
-        point = search_box_point(bounds)
-        if point and in_search_zone(point, bounds):
+        scale = self._pixel_scale()
+        point = search_box_point(bounds, scale)
+        if point and in_search_zone(point, bounds, scale):
             return point
         return None
 
@@ -312,6 +331,41 @@ class Runner:
             return False
         return role in TEXT_ROLES
 
+    def _pixel_scale(self) -> float:
+        """Physical pixels per CSS pixel. macOS and fakes stay at 1."""
+
+        getter = getattr(self.browser, "pixel_scale", None)
+        if getter is None:
+            return 1.0
+        try:
+            value = getter() if callable(getter) else float(getter)
+            value = float(value)
+        except (TypeError, ValueError, OSError, RuntimeError):
+            return 1.0
+        if not value > 0:
+            return 1.0
+        return value
+
+    def _popup_blocks_keys(self) -> bool:
+        """True when a Chrome dialog, not the page window, has the OS focus."""
+
+        check = getattr(self.browser, "main_window_is_front", None)
+        if not callable(check):
+            return False
+        try:
+            return not bool(check())
+        except (OSError, OsaError, ValueError, RuntimeError):
+            return True
+
+    def _omnibox_is_safe(self) -> bool:
+        """Enter may go to the omnibox, not to a dialog's default button."""
+
+        if self._popup_blocks_keys():
+            return False
+        if sys.platform == "win32" and callable(getattr(self.browser, "main_window_is_front", None)):
+            return True
+        return self._text_focused()
+
     def _type_url(self, url: str) -> None:
         if not self._arm():
             self.browser.navigate(url)
@@ -319,7 +373,7 @@ class Runner:
             return
         self.pointer.hotkey("l", ("command",))
         self._sleep(0.12)
-        if not self._our_window_is_front():
+        if not self._our_window_is_front() or not self._omnibox_is_safe():
             self.log("skipped typing, signed-out Chrome is not in front")
             self.browser.navigate(url)
             self._remember_navigation(url)

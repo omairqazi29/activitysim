@@ -25,16 +25,19 @@ from activitysim.runner import Config, Runner
 
 HELP = f"""\
 activitysim {__version__}
-Browse public pages and move the pointer on your Mac.
+Browse public pages and move the pointer on your Mac or Windows PC.
 
 This opens a separate signed-out Chrome on GitHub advanced search, types a
 query, and clicks through the repository results. Those are real mouse clicks
 and keystrokes, which is what an idle check looks for. Your signed-in Chrome
 is not used, so the window has no X or GitHub session.
 
-If Accessibility is off, macOS is prompted and System Settings opens. The run
-waits until the switch is on. Without that permission it stops, because
+On a Mac, if Accessibility is off, macOS is prompted and System Settings opens.
+The run waits until the switch is on. Without that permission it stops, because
 AppleScript alone does not count as activity.
+
+On Windows, mouse and keyboard events are posted with SendInput. Run as the
+normal user, not as Administrator.
 
 Your signed-in Chrome is left alone. Clicks stay on the search box and
 the result list, not on Star, Fork, or Watch. Power settings are not changed.
@@ -44,7 +47,7 @@ the result list, not on Star, Fork, or Watch. Power settings are not changed.
   python3 -m activitysim doctor
   python3 -m activitysim run --help
 
-Stay awake with the command you already planned, in another terminal:
+On a Mac, stay awake with the command you already planned, in another terminal:
 
   sudo pmset -a disablesleep 1
 
@@ -52,7 +55,10 @@ Put it back later:
 
   sudo pmset -a disablesleep 0
 
-Run activitysim itself as your user, not with sudo.
+Run activitysim itself as your user, not with sudo. sudo is only for pmset.
+
+On Windows, --caffeinate calls SetThreadExecutionState and keeps this process
+awake until exit. It does not change the power plan. Stop with Ctrl+C.
 """
 
 
@@ -71,13 +77,34 @@ def parse_duration(text: str) -> float:
     return float(raw)
 
 
+def root_message(is_root: bool, platform: str) -> str | None:
+    """Refusal text for an elevated process. Tests pass the platform in."""
+
+    if not is_root:
+        return None
+    if platform == "win32":
+        return "Run activitysim as the normal user, not as Administrator."
+    return (
+        "Run activitysim as your user, not with sudo. "
+        "sudo is only for the separate pmset command."
+    )
+
+
 def root_error(euid: int) -> str | None:
-    if euid == 0:
-        return (
-            "Run activitysim as your user, not with sudo. "
-            "sudo is only for the separate pmset command."
-        )
-    return None
+    return root_message(euid == 0, sys.platform)
+
+
+def is_elevated() -> bool:
+    """True for uid 0 on macOS and for an Administrator token on Windows.
+
+    os.geteuid does not exist on Windows and is not called there.
+    """
+
+    if sys.platform == "win32":
+        from activitysim.winchrome import is_user_admin
+
+        return is_user_admin()
+    return os.geteuid() == 0
 
 
 def build_run_parser() -> argparse.ArgumentParser:
@@ -149,7 +176,11 @@ def build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--caffeinate",
         action="store_true",
-        help="also run caffeinate so idle sleep stays off until this exits",
+        help=(
+            "keep this process awake until exit. "
+            "On macOS this runs caffeinate -imsu -w. "
+            "On Windows this calls SetThreadExecutionState and does not change the power plan"
+        ),
     )
     return parser
 
@@ -210,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    problem = root_error(os.geteuid())
+    problem = root_message(is_elevated(), sys.platform)
     if problem:
         print(problem, file=sys.stderr)
         return 2
@@ -225,13 +256,20 @@ def run(config: Config, args: argparse.Namespace) -> int:
     places = Places(rng, extra)
     caffeinate = None
     browser = None
+    awake = False
     try:
         if args.caffeinate and not config.dry_run:
-            caffeinate = subprocess.Popen(
-                ["caffeinate", "-imsu", "-w", str(os.getpid())],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            if sys.platform == "win32":
+                from activitysim.winchrome import AWAKE_FLAGS, set_execution_state
+
+                set_execution_state(AWAKE_FLAGS)
+                awake = True
+            else:
+                caffeinate = subprocess.Popen(
+                    ["caffeinate", "-imsu", "-w", str(os.getpid())],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         if config.dry_run:
             clock = FakeClock()
             browser = FakeBrowser()
@@ -246,6 +284,24 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 clock=clock.time,
                 sleep=clock.sleep,
                 focused_role=lambda: "AXTextField",
+            )
+        elif sys.platform == "win32":
+            from activitysim.winchrome import frontmost_app as win_frontmost
+            from activitysim.wininput import WinInput
+            from activitysim.winpage import focused_role_from, result_clicks_from, search_field_from
+
+            browser = Chrome()
+            pointer = WinInput(rng)
+            runner = Runner(
+                config,
+                browser,
+                pointer,
+                places,
+                rng,
+                frontmost=win_frontmost,
+                focused_role=lambda: focused_role_from(browser),
+                find_search_box=lambda bounds: search_field_from(browser, bounds),
+                find_results=lambda bounds: result_clicks_from(browser, bounds),
             )
         else:
             browser = Chrome()
@@ -272,18 +328,25 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 browser.close_window()
             except OsaError as exc:
                 print(f"could not close the simulator window: {exc}", file=sys.stderr)
+        if awake:
+            from activitysim.winchrome import ES_CONTINUOUS, set_execution_state
+
+            set_execution_state(ES_CONTINUOUS)
         if caffeinate is not None and caffeinate.poll() is None:
             caffeinate.terminate()
 
 
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="activitysim doctor")
-    parser.add_argument(
-        "--open-settings",
-        action="store_true",
-        help="open the Accessibility privacy pane",
-    )
+    if sys.platform != "win32":
+        parser.add_argument(
+            "--open-settings",
+            action="store_true",
+            help="open the Accessibility privacy pane",
+        )
     args = parser.parse_args(argv)
+    if sys.platform == "win32":
+        return _doctor_windows()
     print(f"activitysim {__version__}")
     chrome = find_chrome()
     if chrome is None:
@@ -308,4 +371,28 @@ def doctor(argv: list[str]) -> int:
         print("Then run activitysim again. It will wait and continue once the switch is on.")
     if args.open_settings and ready:
         open_accessibility_settings()
+    return 0 if chrome is not None else 1
+
+
+def _doctor_windows() -> int:
+    """Print the Chrome path and nudge the pointer. No Accessibility pane."""
+
+    from activitysim.wininput import WinInput
+
+    print(f"activitysim {__version__}")
+    chrome = find_chrome()
+    if chrome is None:
+        print("Google Chrome: not installed")
+    else:
+        print(f"Google Chrome: {chrome}")
+        print(f"signed-out profile: {Chrome().profile}")
+        print("your signed-in Chrome is not used")
+    print(f"python: {sys.executable}")
+    print("nudging the pointer 2 pixels")
+    ready = WinInput().available()
+    if ready:
+        print("pointer: moves. keyboard control can run")
+    else:
+        print("pointer: did not move")
+        print("This must run as the interactive user, not as Administrator.")
     return 0 if chrome is not None else 1
