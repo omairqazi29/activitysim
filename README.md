@@ -1,10 +1,11 @@
 # activitysim
 
 A small program for macOS and Windows that looks like someone is using the
-machine. It opens its **own** signed-out Google Chrome, searches GitHub, and
-browses public frontier-benchmark sites. The clicks and keystrokes are real
-input events. An idle check that only watches the pointer and keyboard will
-see them. Changing a tab with AppleScript alone will not.
+machine. It checks out a public GitHub repository and opens that folder in
+its **own** Visual Studio Code window, then uses a separate signed-out Google
+Chrome for GitHub and, less often, public benchmark sites. The clicks and
+keystrokes are real input events. An idle check that only watches the pointer
+and keyboard will see them. Changing a tab with AppleScript alone will not.
 
 A normal run prints `launching dev browser` and then stays quiet. Errors are
 printed on their own.
@@ -52,23 +53,27 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 
 - Asks for Accessibility if the pointer cannot move yet, opens that Settings
   pane, and waits until the switch is on.
-- Opens one signed-out Chrome window on a random benchmark site. GitHub is
-  not the first page. Your Chrome stays as it was. If that window opens, the
-  program prints `launching dev browser` and then stays quiet.
-- The first site is one of DeepSWE, ProgramBench, SWE-bench, Terminal-Bench,
-  LiveCodeBench, SWE-bench Live, or SWE-smith. Which site comes first depends
-  on the seed. The nav is used in a random order. Tasks are opened, and a
-  trace is opened when the site has one. Some visits end on a GPT-6 Astra page.
-- Later chapters are a random mix of another benchmark site, a GitHub
-  repository, and a GitHub advanced search. The same popular repositories do
-  not stay on screen. A repository already opened in this session is left
-  again instead of being read twice. A repository visit opens the project,
-  a source file when the file tree is on screen, then issues, pull requests,
-  or commits. Typed characters assume a US keyboard.
+- Checks out one modest public repository with a shallow `git clone` into
+  its own folder, then opens that folder in a separate Visual Studio Code
+  window. That window uses activitysim's profile, not the Code you are
+  signed into. It opens source files with Quick Open, scrolls, moves through
+  the text, and sometimes searches in the file. It does not save. If that
+  window opens, the program prints `launching dev browser` and then stays
+  quiet. Your Chrome and your own Code stay as they were.
+- Later chapters keep that mix: about six in ten are the editor, about three
+  in ten are GitHub, and about one in ten is a benchmark site. GitHub is a
+  repository it has not already opened, or an advanced search. A repository
+  visit opens the project, a source file when the file tree is on screen,
+  then issues, pull requests, or commits.
+- A benchmark visit is short. The site is one of DeepSWE, ProgramBench,
+  SWE-bench, Terminal-Bench, LiveCodeBench, SWE-bench Live, or SWE-smith.
+  If Visual Studio Code or git is missing, the editor chapters stay on GitHub
+  instead of moving onto those sites.
 - On each page, scrolls down and pages through the text, then clicks in the
   page body. Reading the open page waits less than changing pages. The
   default quiet stretch between page changes is 0.45s to 1.6s.
-- Presses Command+Left to go back, then continues.
+- Presses Command+Left to go back in Chrome, then continues. In the editor,
+  Command+P opens a file and Command+F searches. Neither chord is sent to Chrome.
 
 Your signed-in Chrome is not controlled. If that Chrome is the one in front,
 the simulator backs off instead of clicking it.
@@ -76,13 +81,17 @@ the simulator backs off instead of clicking it.
 ## What it will not do
 
 - It will not open a window in the Chrome that is signed into X or GitHub.
+- It will not open your signed-in Visual Studio Code profile, and it will not
+  open a folder outside its own checkout.
 - It will not read that Chrome's cookies, passwords, or the login keychain.
+- It will not save files in the editor, and it will not type there unless
+  that window is in front.
 - It will not open X or Twitter. Those hosts do not resolve in the signed-out Chrome.
 - It will not click the right side of a result row, where Star, Fork, and Watch sit.
-- It types only into the GitHub search box or the address bar, and only while its own Chrome is in front.
+- In Chrome it types only into the GitHub search box or the address bar, and only while its own Chrome is in front. In the editor it types a source path into Quick Open, or a short find token, and only while that window is in front.
 - It will not send Cmd+Q, Cmd+W, or Space. Space would activate a focused button. Cmd+W would close a tab.
 - It will not open `javascript:`, `file:`, or URLs that contain a username and password.
-- It backs off for 30 seconds if you move the mouse or switch away from Chrome after it had Chrome in front. `--pause 0` turns that off.
+- It backs off for 30 seconds if you move the mouse or switch away from the app it is driving. `--pause 0` turns that off.
 - It will not run as root.
 
 ## Permissions

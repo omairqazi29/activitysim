@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +13,8 @@ from pathlib import Path
 from activitysim import __version__
 from activitysim.browse import locate_link, source_link
 from activitysim.chrome import Chrome, find_chrome
-from activitysim.fakes import FakeBrowser, FakeClock, FakePointer
+from activitysim.editor import CodeEditor, GitWork, find_code
+from activitysim.fakes import FakeBrowser, FakeClock, FakeEditor, FakePointer, FakeWork
 from activitysim.ax import focused_role, result_clicks, search_field
 from activitysim.input import (
     MacInput,
@@ -28,15 +30,16 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac or Windows PC.
 
-This opens a separate signed-out Chrome on a random public benchmark site
-such as DeepSWE, ProgramBench, SWE-bench, or Terminal-Bench. GitHub is not
-the first page. Later chapters mix those sites, in random order, with GitHub
-searches and repositories it has not already opened. Each site's nav is
-shuffled. Tasks are opened, and a trace is opened when the site has one.
-Sometimes it opens a GPT-6 Astra result. On each page it scrolls and pages
-through the text, then moves on. A repository visit also opens a source file
-when the file tree is on screen, then issues, pull requests, or commits.
-The quiet stretch while reading is short, so the pointer keeps moving.
+This checks out a public GitHub repository and opens that folder in its own
+Visual Studio Code window. That window has a separate profile, not the Code
+you are signed into. It opens files, scrolls, and searches in them. It does
+not save. GitHub is next: repositories it has not already opened, and advanced
+search. About one chapter in ten is a public benchmark site such as DeepSWE,
+ProgramBench, SWE-bench, or Terminal-Bench. A site visit is short. A
+repository page also opens a source file when the file tree is on screen,
+then issues, pull requests, or commits. The quiet stretch while reading is
+short, so the pointer keeps moving. If Visual Studio Code or git is missing,
+those chapters stay on GitHub.
 Those are real mouse clicks and keystrokes, which is what an idle check
 looks for. Your signed-in Chrome is not used, so the window has no X or
 GitHub session.
@@ -51,8 +54,9 @@ AppleScript alone does not count as activity.
 On Windows, mouse and keyboard events are posted with SendInput. Run as the
 normal user, not as Administrator.
 
-Your signed-in Chrome is left alone. Clicks stay on the search box and
-the result list, not on Star, Fork, or Watch. Power settings are not changed.
+Your signed-in Chrome is left alone. Clicks in Chrome stay on the search box and
+the result list, not on Star, Fork, or Watch. In the editor, clicks stay in the
+text area. Power settings are not changed.
 
   python3 -m activitysim
   python3 -m activitysim run --for 2h
@@ -286,6 +290,10 @@ def run(config: Config, args: argparse.Namespace) -> int:
             clock = FakeClock()
             browser = FakeBrowser()
             pointer = FakePointer(ready=True)
+            editor = FakeEditor()
+            work = FakeWork()
+            browser.attach(pointer)
+            editor.attach(pointer)
             runner = Runner(
                 config,
                 browser,
@@ -296,6 +304,8 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 clock=clock.time,
                 sleep=clock.sleep,
                 focused_role=lambda: "AXTextField",
+                editor=editor,
+                work=work,
             )
         elif sys.platform == "win32":
             from activitysim.winchrome import frontmost_app as win_frontmost
@@ -316,6 +326,8 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 find_results=lambda bounds: result_clicks_from(browser, bounds),
                 find_link=lambda url: locate_link(browser, url),
                 find_source=lambda: source_link(browser),
+                editor=CodeEditor(),
+                work=GitWork(rng),
             )
         else:
             browser = Chrome()
@@ -332,6 +344,8 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 find_results=result_clicks,
                 find_link=lambda url: locate_link(browser, url),
                 find_source=lambda: source_link(browser),
+                editor=CodeEditor(),
+                work=GitWork(rng),
             )
         runner.run()
         return 0
@@ -372,6 +386,13 @@ def doctor(argv: list[str]) -> int:
         print(f"signed-out profile: {Chrome().profile}")
         print("your signed-in Chrome is not used")
     print(f"python: {sys.executable}")
+    code = find_code()
+    if code is None:
+        print("Visual Studio Code: not installed")
+    else:
+        print(f"Visual Studio Code: {code}")
+    git = shutil.which("git")
+    print(f"git: {git or 'not installed'}")
     print(f"accessibility trusted: {accessibility_trusted()}")
     print("asking macOS for Accessibility, then nudging the pointer 2 pixels")
     prompt_accessibility()
@@ -404,6 +425,13 @@ def _doctor_windows() -> int:
         print(f"signed-out profile: {Chrome().profile}")
         print("your signed-in Chrome is not used")
     print(f"python: {sys.executable}")
+    code = find_code()
+    if code is None:
+        print("Visual Studio Code: not installed")
+    else:
+        print(f"Visual Studio Code: {code}")
+    git = shutil.which("git")
+    print(f"git: {git or 'not installed'}")
     print("nudging the pointer 2 pixels")
     ready = WinInput().available()
     if ready:

@@ -103,6 +103,7 @@ NAMED_KEYS = {
     "pageup": 116,
     "l": 37,
     "f": 3,
+    "p": 35,
     "r": 15,
     "a": 0,
     "1": 18,
@@ -116,8 +117,9 @@ NAMED_KEYS = {
 }
 
 # These keys insert text unless Command is held. Command+A selects the search
-# field. Command+1 through Command+8 are tab switches.
-COMMAND_ONLY = frozenset({"a", *(str(number) for number in range(1, 9))})
+# field. Command+1 through Command+8 are tab switches. Command+P is Quick Open
+# in the editor and is refused without Command so it cannot be sent bare.
+COMMAND_ONLY = frozenset({"a", "p", *(str(number) for number in range(1, 9))})
 
 # Nothing that quits, closes a tab, or activates a focused button.
 REFUSED_KEYS = {"q", "w", "space"}

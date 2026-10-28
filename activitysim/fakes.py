@@ -57,7 +57,7 @@ class FakePointer:
         mods = tuple(modifiers)
         if key in {"q", "w", "space"}:
             raise ValueError(f"refusing key {key!r}")
-        if key.isdigit() and "command" not in mods:
+        if (key.isdigit() or key in {"a", "p"}) and "command" not in mods:
             raise ValueError(f"{key} is only sent with command")
         self.keys.append((key, mods))
 
@@ -90,6 +90,7 @@ class FakeBrowser:
         self.reloads = 0
         self.js = False
         self.activated = 0
+        self.pointer = None
 
     def installed(self) -> bool:
         return True
@@ -102,8 +103,13 @@ class FakeBrowser:
         self.window_id = "dry-window"
         return self.window_id
 
+    def attach(self, pointer) -> None:
+        self.pointer = pointer
+
     def activate(self) -> None:
         self.activated += 1
+        if self.pointer is not None:
+            self.pointer.front = "Google Chrome"
 
     def bounds(self) -> tuple[float, float, float, float]:
         return self.bounds_value
@@ -166,3 +172,66 @@ class FakeBrowser:
             self.active = 1
             return
         self.tabs[self.active - 1] = url
+
+
+class FakeEditor:
+    """A stand-in Visual Studio Code. It records opens and does not launch."""
+
+    def __init__(self) -> None:
+        self.present = True
+        self.pointer = None
+        self.opened: list[str] = []
+        self.activated = 0
+        self.bounds_value = (40.0, 40.0, 1500.0, 980.0)
+        self._front = True
+
+    def attach(self, pointer) -> None:
+        self.pointer = pointer
+
+    def installed(self) -> bool:
+        return self.present
+
+    def open_folder(self, folder: str) -> None:
+        self.opened.append(str(folder))
+        self.activate()
+
+    def activate(self) -> None:
+        self.activated += 1
+        if self.pointer is not None and self._front:
+            self.pointer.front = "Code"
+
+    def is_front(self) -> bool:
+        if not self._front:
+            return False
+        if self.pointer is None:
+            return True
+        return self.pointer.front == "Code"
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self.bounds_value
+
+
+class FakeWork:
+    """Checkouts that do not call git."""
+
+    def __init__(self) -> None:
+        self.present = True
+        self.repos = ("pallets/flask", "encode/httpx", "tiangolo/fastapi")
+        self.i = 0
+        self.checkouts: list[str] = []
+        self.tree = ["README.md", "src/app.py", "src/util.py", "docs/guide.md"]
+
+    def ready(self) -> bool:
+        return self.present
+
+    def next_repo(self) -> str:
+        repo = self.repos[self.i % len(self.repos)]
+        self.i += 1
+        return repo
+
+    def checkout(self, repo: str) -> str:
+        self.checkouts.append(repo)
+        return f"/tmp/activitysim-code/{repo}"
+
+    def files(self, folder: str) -> list[str]:
+        return list(self.tree)
