@@ -15,6 +15,37 @@ Rect = tuple[float, float, float, float]
 Point = tuple[float, float]
 
 
+_SOURCE_EXPRESSION = """(() => {
+  var nodes = document.querySelectorAll('a[href*="/blob/"]');
+  var limit = nodes.length < 400 ? nodes.length : 400;
+  for (var i = 0; i < limit; i++) {
+    var el = nodes[i];
+    var href = el.href || "";
+    if (href.indexOf("https://github.com/") !== 0) continue;
+    if (href.indexOf("/blob/") < 0) continue;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) continue;
+    if (rect.bottom < 0 || rect.right < 0) continue;
+    if (rect.left > window.innerWidth * 0.72) continue;
+    return href;
+  }
+  return null;
+})()"""
+
+
+def source_link(browser) -> str | None:
+    """One visible source file on the current GitHub page, or nothing."""
+
+    payload = _evaluate(browser, _SOURCE_EXPRESSION)
+    if not isinstance(payload, str) or not payload.startswith("https://github.com/"):
+        return None
+    url = payload.split("#", 1)[0]
+    pieces = [part for part in url.split("/") if part]
+    if "blob" not in pieces:
+        return None
+    return url
+
+
 def locate_link(browser, url: str) -> Point | None:
     try:
         bounds = browser.bounds()

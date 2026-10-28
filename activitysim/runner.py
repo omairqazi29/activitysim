@@ -13,10 +13,12 @@ import random
 import sys
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from activitysim.geom import away_from_hot_corners, pointer_moved, user_left_chrome
 from activitysim.input import can_type
 from activitysim.osa import OsaError
+from activitysim.places import repo_name
 from activitysim.search import (
     ADVANCED_URL,
     QueryDeck,
@@ -42,12 +44,12 @@ def _in_window(point: tuple[float, float], bounds: tuple[float, float, float, fl
 
 @dataclass
 class Config:
-    min_gap: float = 2
-    max_gap: float = 6
+    min_gap: float = 0.45
+    max_gap: float = 1.6
     pause: float = 30
     max_tabs: int = 5
     duration: float = 0
-    startup_delay: float = 1
+    startup_delay: float = 0.3
     tolerance: float = 36
     mouse_only: bool = False
     no_keyboard: bool = False
@@ -70,6 +72,7 @@ class Runner:
         find_search_box=None,
         find_results=None,
         find_link=None,
+        find_source=None,
     ) -> None:
         self.config = config
         self.browser = browser
@@ -83,6 +86,7 @@ class Runner:
         self.find_search_box = find_search_box
         self.find_results = find_results
         self.find_link = find_link
+        self.find_source = find_source
         self.queries = QueryDeck(self.rng)
         self.catalog = Catalog(self.rng)
         self.history: list[str] = []
@@ -108,6 +112,7 @@ class Runner:
         self.repo_i = 0
         self.repo_phase = "open"
         self.repo_reads = 0
+        self._sourced = False
 
     def log(self, message: str, *, error: bool = False) -> None:
         self.history.append(message)
@@ -151,7 +156,7 @@ class Runner:
         self._begin_chapter()
         self._last_pos = self.pointer.position()
         while not self._expired(start):
-            self._sleep(self.rng.uniform(self.config.min_gap, self.config.max_gap))
+            self._sleep(self._gap())
             if self._expired(start):
                 break
             if self._should_pause():
@@ -279,7 +284,7 @@ class Runner:
         if self.tour_i >= len(self.tour_urls):
             return False
         self._visit(self.tour_urls[self.tour_i])
-        self.tour_reads = self.rng.randint(1, 2)
+        self.tour_reads = self.rng.randint(2, 3)
         self.tour_phase = "read"
         return True
 
@@ -291,6 +296,7 @@ class Runner:
         self.repo_i = 0
         self.repo_phase = "open"
         self.repo_reads = 0
+        self._sourced = False
         self.mode = "repo"
         self._repo_continues()
 
@@ -305,8 +311,9 @@ class Runner:
         if self.repo_i >= len(self.repo_urls):
             return False
         self._visit(self.repo_urls[self.repo_i])
-        self.repo_reads = self.rng.randint(1, 2)
+        self.repo_reads = self.rng.randint(2, 3)
         self.repo_phase = "read"
+        self._queue_source()
         return True
 
     def _visit(self, url: str) -> None:
@@ -336,7 +343,7 @@ class Runner:
         if opened:
             self.actions.append("visit")
             self.log(f"open {url}")
-        self._sleep(self.rng.uniform(1.0, 1.8))
+        self._settle()
 
     def _link_point(self, url: str) -> tuple[float, float] | None:
         if self.find_link is None:
@@ -374,14 +381,14 @@ class Runner:
             self.places.leave_page()
             self.places.plan_repo(None)
         query = self.queries.next()
-        self.per_query = self.rng.randint(2, 4)
+        self.per_query = self.rng.randint(3, 5)
         self.log(f"github advanced search: {query}")
         self.actions.append("search")
         if not self._window_open():
             self._open_fresh(ADVANCED_URL)
         elif self.can_keys and not self._on_advanced():
             self._type_url(ADVANCED_URL)
-            self._sleep(self.rng.uniform(1.2, 2.0))
+            self._settle()
         self._submit_query(query)
         self.points = self._collect_results()
         self.pi = 0
@@ -409,14 +416,14 @@ class Runner:
             self.results_url = target
             self._remember_navigation(target)
             self.log(f"typed {query}")
-            self._sleep(self.rng.uniform(1.6, 2.6))
+            self._settle()
             return
         target = results_url(query)
         self.results_url = target
         self.browser.navigate(target)
         self._remember_navigation(target)
         self.log(f"open {target}")
-        self._sleep(self.rng.uniform(1.6, 2.6))
+        self._settle()
 
     def _open_result(self) -> None:
         bounds = self._bounds()
@@ -428,7 +435,7 @@ class Runner:
         self.actions.append("result")
         if not self._click(point, f"result {self.pi}"):
             return
-        self.reads_left = self.rng.randint(2, 3)
+        self.reads_left = self.rng.randint(2, 4)
         self.mode = "item"
 
     def _read(self) -> None:
@@ -437,30 +444,57 @@ class Runner:
             self.log("skip a repo already open")
             return
         self.actions.append("read")
-        if self.can_keys and self._arm():
-            key = self.rng.choice(["down", "down", "pagedown", "up"])
-            count = self.rng.randint(2, 4)
-            for _ in range(count):
-                if not self._our_window_is_front():
+        if not self._scan():
+            return
+        if self.rng.random() < 0.45:
+            self._click_body()
+
+    def _scan(self) -> bool:
+        """Scroll down the page and page through it. False if Chrome is not in front."""
+
+        bounds = self._bounds()
+        scale = self._pixel_scale()
+        if bounds is not None and self.can_point:
+            hover = readme_point(bounds, self.rng, scale)
+            if hover is not None and in_readme_zone(hover, bounds, scale):
+                if not self._arm():
                     self.log("skipped keys, signed-out Chrome is not in front")
-                    break
-                self.pointer.hotkey(key, ())
-                self._sleep(self.rng.uniform(0.05, 0.16))
-            self.log(f"key {key} x{count}")
+                    return False
+                self.pointer.move_to(*hover)
+                for _ in range(2):
+                    if not self._our_window_is_front():
+                        self.log("skipped keys, signed-out Chrome is not in front")
+                        return False
+                    self.pointer.scroll(self._scroll_delta())
+                    self._sleep(self.rng.uniform(0.03, 0.08))
+                self.log("scroll the result")
+        if not (self.can_keys and self._arm()):
+            return self._our_window_is_front()
+        key = self.rng.choice(("down", "down", "down", "pagedown", "pagedown", "up"))
+        count = self.rng.randint(4, 8)
+        for _ in range(count):
+            if not self._our_window_is_front():
+                self.log("skipped keys, signed-out Chrome is not in front")
+                return False
+            self.pointer.hotkey(key, ())
+            self._sleep(self.rng.uniform(0.03, 0.08))
+        self.log(f"key {key} x{count}")
+        return True
+
+    def _scroll_delta(self) -> int:
+        if self.rng.random() < 0.12:
+            return self.rng.choice((-2, -1))
+        return self.rng.choice((4, 5, 6, 7))
+
+    def _click_body(self) -> bool:
         bounds = self._bounds()
         if bounds is None or not self.can_point:
-            return
+            return False
         scale = self._pixel_scale()
-        if self.rng.random() < 0.5:
-            point = readme_point(bounds, self.rng, scale)
-            if point is not None and in_readme_zone(point, bounds, scale):
-                self._click(point, "inside the result")
-                return
-        hover = readme_point(bounds, self.rng, scale)
-        if hover is not None:
-            self.pointer.move_to(*hover)
-            self.pointer.scroll(self.rng.choice([3, 4, 5, -2]))
-            self.log("scroll the result")
+        point = readme_point(bounds, self.rng, scale)
+        if point is None or not in_readme_zone(point, bounds, scale):
+            return False
+        return self._click(point, "inside the result")
 
     def _back(self) -> None:
         if self.places is not None:
@@ -472,7 +506,7 @@ class Runner:
         else:
             self.browser.back()
             self.log("back to results")
-        self._sleep(self.rng.uniform(0.5, 0.9))
+        self._settle()
         if self.results_url:
             self._remember_navigation(self.results_url)
 
@@ -683,6 +717,82 @@ class Runner:
 
     def _expired(self, start: float) -> bool:
         return bool(self.config.duration) and (self.clock() - start) >= self.config.duration
+
+    def _gap(self) -> float:
+        """Quiet time before the next action. Reading the open page waits less."""
+
+        low = self.config.min_gap
+        high = self.config.max_gap
+        if self._reading_now():
+            low *= 0.35
+            high = max(low, self.config.max_gap * 0.4)
+        return self.rng.uniform(low, high)
+
+    def _reading_now(self) -> bool:
+        if self.mode == "item" and self.reads_left > 0:
+            return True
+        if self.mode == "tour" and self.tour_phase == "read" and self.tour_reads > 0:
+            return True
+        if self.mode == "repo" and self.repo_phase == "read" and self.repo_reads > 0:
+            return True
+        return self.mode == "results" and self.pi < min(len(self.points), self.per_query)
+
+    def _settle(self) -> None:
+        """Wait until the navigation has committed, then stop once the page is ready."""
+
+        self._sleep(self.rng.uniform(0.25, 0.4))
+        deadline = self.clock() + 1.8
+        while self.clock() < deadline:
+            state = self._ready_state()
+            if state is None or state == "complete":
+                break
+            self._sleep(0.1)
+        self._sleep(self.rng.uniform(0.05, 0.12))
+
+    def _ready_state(self) -> str | None:
+        evaluate = getattr(self.browser, "evaluate", None)
+        if not callable(evaluate):
+            return None
+        try:
+            state = evaluate("document.readyState")
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return "loading"
+        if not isinstance(state, str):
+            return "loading"
+        return state
+
+    def _queue_source(self) -> None:
+        """Open one source file from the repo root before the review tabs."""
+
+        if self._sourced or self.find_source is None or self.mode != "repo":
+            return
+        current = self._current_url()
+        name = repo_name(current)
+        if not name:
+            return
+        if urlsplit(current).path.strip("/").lower() != name.lower():
+            return
+        self._sourced = True
+        try:
+            found = self.find_source()
+        except (OSError, OsaError, ValueError, TypeError, RuntimeError):
+            return
+        if not isinstance(found, str):
+            return
+        url = found.split("#", 1)[0]
+        if not self._repo_file(url, name) or url in self.repo_urls:
+            return
+        self.repo_urls.insert(self.repo_i + 1, url)
+        self.log(f"source {url}")
+
+    def _repo_file(self, url: str, name: str) -> bool:
+        if not allowed_url(url):
+            return False
+        other = repo_name(url)
+        if other is None or other.lower() != name.lower():
+            return False
+        pieces = [part for part in urlsplit(url).path.split("/") if part]
+        return len(pieces) >= 4 and pieces[2] == "blob"
 
     def _sleep(self, seconds: float) -> None:
         if seconds <= 0:
