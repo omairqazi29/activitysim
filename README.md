@@ -62,8 +62,12 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 - Later chapters are a random mix of another benchmark site, a GitHub
   repository, and a GitHub advanced search. The same popular repositories do
   not stay on screen. A repository already opened in this session is left
-  again instead of being read twice. Typed characters assume a US keyboard.
-- On each page, presses arrow keys, scrolls, and clicks in the page body.
+  again instead of being read twice. A repository visit opens the project,
+  a source file when the file tree is on screen, then issues, pull requests,
+  or commits. Typed characters assume a US keyboard.
+- On each page, scrolls down and pages through the text, then clicks in the
+  page body. Reading the open page waits less than changing pages. The
+  default quiet stretch between page changes is 0.45s to 1.6s.
 - Presses Command+Left to go back, then continues.
 
 Your signed-in Chrome is not controlled. If that Chrome is the one in front,
@@ -113,6 +117,10 @@ python3 -m activitysim run --urls urls.example.txt
 python3 -m activitysim run --dry-run --for 1m --seed 7
 python3 -m activitysim run --caffeinate
 ```
+
+`--min-gap 4 --max-gap 15` slows the session down. The defaults stay short so
+the pointer keeps moving. Reading the page that is already open waits less
+than that range.
 
 `--for` accepts `30s`, `45m`, `2h`, or `forever` (the default). `--caffeinate`
 asks macOS to ignore idle sleep until the program exits, without the persistent

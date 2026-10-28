@@ -412,7 +412,7 @@ class Catalog:
         self._visits += 1
         urls: list[str] = [chosen.home]
         urls.extend(self._pick(chosen.nav, 2, 4))
-        task_urls = self._pick(chosen.tasks, 1, 3)
+        task_urls = self._pick(chosen.tasks, 2, 3)
         saw_trace = False
         for task_url in task_urls:
             urls.append(task_url)

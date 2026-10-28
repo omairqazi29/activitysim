@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from activitysim import __version__
-from activitysim.browse import locate_link
+from activitysim.browse import locate_link, source_link
 from activitysim.chrome import Chrome, find_chrome
 from activitysim.fakes import FakeBrowser, FakeClock, FakePointer
 from activitysim.ax import focused_role, result_clicks, search_field
@@ -33,9 +33,13 @@ such as DeepSWE, ProgramBench, SWE-bench, or Terminal-Bench. GitHub is not
 the first page. Later chapters mix those sites, in random order, with GitHub
 searches and repositories it has not already opened. Each site's nav is
 shuffled. Tasks are opened, and a trace is opened when the site has one.
-Sometimes it opens a GPT-6 Astra result. Those are real mouse clicks and
-keystrokes, which is what an idle check looks for. Your signed-in Chrome is
-not used, so the window has no X or GitHub session.
+Sometimes it opens a GPT-6 Astra result. On each page it scrolls and pages
+through the text, then moves on. A repository visit also opens a source file
+when the file tree is on screen, then issues, pull requests, or commits.
+The quiet stretch while reading is short, so the pointer keeps moving.
+Those are real mouse clicks and keystrokes, which is what an idle check
+looks for. Your signed-in Chrome is not used, so the window has no X or
+GitHub session.
 
 A normal run prints "launching dev browser" and then stays quiet. If something
 fails, that error is printed instead. --dry-run still prints the session.
@@ -129,14 +133,14 @@ def build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-gap",
         type=float,
-        default=2,
-        help="shortest quiet stretch between actions, in seconds",
+        default=0.45,
+        help="shortest quiet stretch between page changes, in seconds. Reading waits about a third of this",
     )
     parser.add_argument(
         "--max-gap",
         type=float,
-        default=6,
-        help="longest quiet stretch between actions, in seconds",
+        default=1.6,
+        help="longest quiet stretch between page changes, in seconds. Reading waits about 0.4 of this",
     )
     parser.add_argument(
         "--pause",
@@ -311,6 +315,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 find_search_box=lambda bounds: search_field_from(browser, bounds),
                 find_results=lambda bounds: result_clicks_from(browser, bounds),
                 find_link=lambda url: locate_link(browser, url),
+                find_source=lambda: source_link(browser),
             )
         else:
             browser = Chrome()
@@ -326,6 +331,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
                 find_search_box=search_field,
                 find_results=result_clicks,
                 find_link=lambda url: locate_link(browser, url),
+                find_source=lambda: source_link(browser),
             )
         runner.run()
         return 0

@@ -63,7 +63,7 @@ from activitysim.input import (
     can_type,
 )
 from activitysim.osa import OsaError, as_text
-from activitysim.browse import locate_link
+from activitysim.browse import locate_link, source_link
 from activitysim.places import REPOS, Places, load_url_file, safe_url
 from activitysim.sites import ASTRA, DEEPSWE, SITES, Catalog, allowed_url
 from activitysim.runner import Config, Runner
@@ -250,7 +250,15 @@ class PlaceTests(unittest.TestCase):
         burst = Places(random.Random(5), [])._repo_burst()
         path = urllib.parse.urlsplit(burst[0]).path.strip("/")
         self.assertEqual(path.count("/"), 1)
-        self.assertGreaterEqual(len(burst), 2)
+        self.assertGreaterEqual(len(burst), 3)
+        self.assertLessEqual(len(burst), 4)
+        review = {"issues", "pulls", "commits"}
+        tails = set()
+        for url in burst[1:]:
+            parts = urllib.parse.urlsplit(url).path.strip("/").split("/")
+            self.assertGreaterEqual(len(parts), 3, url)
+            tails.add(parts[2])
+        self.assertTrue(tails & review, tails)
 
     def test_rejects_dangerous_urls(self) -> None:
         self.assertFalse(safe_url("javascript:alert(1)"))
@@ -594,6 +602,27 @@ class SearchGeometryTests(unittest.TestCase):
 
         self.assertIsNone(locate_link(Empty(), "https://deepswe.datacurve.ai/blog"))
 
+    def test_source_link_is_a_blob_on_github(self) -> None:
+        class Page:
+            def __init__(self, value) -> None:
+                self.value = value
+                self.expression = ""
+
+            def evaluate(self, expression):
+                self.expression = expression
+                return self.value
+
+        page = Page("https://github.com/python/cpython/blob/main/README.rst#license")
+        self.assertEqual(
+            source_link(page),
+            "https://github.com/python/cpython/blob/main/README.rst",
+        )
+        self.assertIn("/blob/", page.expression)
+        self.assertIn("0.72", page.expression)
+        self.assertIsNone(source_link(Page("https://github.com/python/cpython/stargazers")))
+        self.assertIsNone(source_link(Page("https://example.com/blob/main/README")))
+        self.assertIsNone(source_link(Page(None)))
+
     def test_result_points_avoid_the_star_column(self) -> None:
         points = result_points(self.bounds)
         self.assertGreaterEqual(len(points), 3)
@@ -822,6 +851,89 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn((1.0, 1.0), pointer.clicks)
         self.assertIn("https://deepswe.datacurve.ai/run", pointer.typed)
 
+    def test_a_read_scrolls_and_pages_through_the_page(self) -> None:
+        runner, browser, pointer, _clock = make_runner(duration=4, seed=1)
+        browser.open_window("https://www.swebench.com/")
+        runner.can_point = True
+        runner.can_keys = True
+        with redirect_stdout(StringIO()):
+            runner._read()
+        self.assertIn("read", runner.actions)
+        self.assertGreaterEqual(len(pointer.scrolls), 2)
+        self.assertTrue(all(delta != 0 for delta in pointer.scrolls))
+        moves = [key for key, _mods in pointer.keys if key in {"down", "up", "pagedown", "pageup"}]
+        self.assertGreaterEqual(len(moves), 4)
+        self.assertLessEqual(len(moves), 8)
+
+    def test_reading_waits_less_than_changing_pages(self) -> None:
+        runner, _browser, _pointer, _clock = make_runner(duration=4, seed=1)
+        seen: dict[str, tuple[float, float]] = {}
+
+        def uniform(low: float, high: float) -> float:
+            seen["range"] = (low, high)
+            return low
+
+        runner.rng.uniform = uniform  # type: ignore[method-assign]
+        runner.mode = "tour"
+        runner.tour_phase = "read"
+        runner.tour_reads = 2
+        runner._gap()
+        self.assertEqual(seen["range"], (0.35, 0.4))
+        runner.tour_reads = 0
+        runner._gap()
+        self.assertEqual(seen["range"], (1.0, 1.0))
+
+    def test_settle_returns_once_the_page_is_ready(self) -> None:
+        runner, browser, _pointer, clock = make_runner(duration=5, seed=1)
+        states = iter(("loading", "loading", "complete"))
+        browser.evaluate = lambda _expression: next(states)  # type: ignore[method-assign]
+        runner._settle()
+        self.assertGreater(clock.now, 0.45)
+        self.assertLess(clock.now, 0.9)
+
+        ready, page, _pointer, ready_clock = make_runner(duration=5, seed=1)
+        page.evaluate = lambda _expression: "complete"  # type: ignore[method-assign]
+        ready._settle()
+        self.assertLess(ready_clock.now, clock.now)
+
+        plain, _page, _pointer, plain_clock = make_runner(duration=5, seed=1)
+        plain._settle()
+        self.assertGreater(plain_clock.now, 0.25)
+        self.assertLess(plain_clock.now, 0.6)
+
+    def test_a_repo_root_queues_one_source_file(self) -> None:
+        runner, browser, _pointer, _clock = make_runner(duration=4, seed=1)
+        root = "https://github.com/python/cpython"
+        blob = "https://github.com/python/cpython/blob/main/README.rst"
+        browser.open_window(root)
+        runner.mode = "repo"
+        runner.repo_i = 0
+        runner.repo_urls = [root, "https://github.com/python/cpython/issues"]
+        runner.find_source = lambda: blob + "#license"
+        with redirect_stdout(StringIO()):
+            runner._queue_source()
+        self.assertEqual(runner.repo_urls[1], blob)
+        with redirect_stdout(StringIO()):
+            runner._queue_source()
+        self.assertEqual(runner.repo_urls.count(blob), 1)
+
+        runner, browser, _pointer, _clock = make_runner(duration=4, seed=1)
+        browser.open_window(root)
+        runner.mode = "repo"
+        runner.repo_i = 0
+        runner.repo_urls = [root]
+        runner.find_source = lambda: "https://github.com/python/cpython/stargazers"
+        runner._queue_source()
+        self.assertEqual(runner.repo_urls, [root])
+
+        runner, browser, _pointer, _clock = make_runner(duration=4, seed=1)
+        browser.open_window(root)
+        runner.mode = "repo"
+        runner.repo_urls = [root]
+        runner.find_source = lambda: "javascript:alert(1)"
+        runner._queue_source()
+        self.assertEqual(runner.repo_urls, [root])
+
 
 class CliTests(unittest.TestCase):
     def test_duration_units(self) -> None:
@@ -836,6 +948,15 @@ class CliTests(unittest.TestCase):
     def test_root_is_refused(self) -> None:
         self.assertIsNone(root_error(501))
         self.assertIn("sudo", root_error(0) or "")
+
+    def test_default_gaps_stay_short(self) -> None:
+        config = Config()
+        self.assertEqual(config.min_gap, 0.45)
+        self.assertEqual(config.max_gap, 1.6)
+        parser = __import__("activitysim.cli", fromlist=["build_run_parser"]).build_run_parser()
+        args = parser.parse_args([])
+        self.assertEqual(args.min_gap, config.min_gap)
+        self.assertEqual(args.max_gap, config.max_gap)
 
     def test_invalid_gaps_are_rejected(self) -> None:
         parser = __import__("activitysim.cli", fromlist=["build_run_parser"]).build_run_parser()
@@ -854,6 +975,7 @@ class CliTests(unittest.TestCase):
         text = stdout.getvalue()
         self.assertIn("dry run", text)
         self.assertIn("click", text)
+        self.assertIn("scroll", text)
         self.assertIn("opened Chrome at ", text)
         self.assertNotIn("opened Chrome at https://github.com/", text)
 

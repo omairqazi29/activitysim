@@ -345,7 +345,11 @@ REPO_SUBPATHS: tuple[str, ...] = (
     "/commits",
     "/releases",
     "/graphs/contributors",
+    "/pulse",
 )
+
+# A review opens one of these before the other tabs.
+_REVIEW_PATHS = ("/issues", "/pulls", "/commits")
 
 TOPICS: tuple[str, ...] = (
     "python",
@@ -461,13 +465,15 @@ class Places:
         return repeated
 
     def repo_burst(self) -> list[str]:
-        """The repo root, then one or two of its tabs. Not a repo already seen."""
+        """The repo root, one review tab, then one or two more. Not a repo already seen."""
 
         repo = self._next_repo()
         self._planned = repo.lower()
-        extras = list(REPO_SUBPATHS[1:])
-        self.rng.shuffle(extras)
-        paths = [""] + extras[: self.rng.randint(1, 2)]
+        review = list(_REVIEW_PATHS)
+        self.rng.shuffle(review)
+        others = [path for path in REPO_SUBPATHS[1:] if path not in _REVIEW_PATHS]
+        self.rng.shuffle(others)
+        paths = ["", review[0], *others[: self.rng.randint(1, 2)]]
         return [f"https://github.com/{repo}{path}" for path in paths]
 
     def _next_repo(self) -> str:
