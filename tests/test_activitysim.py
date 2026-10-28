@@ -43,16 +43,36 @@ from activitysim.chrome import (
     scrub_signins,
 )
 from activitysim.cli import _doctor_windows, main, parse_duration, root_error, root_message, validate_run
-from activitysim.fakes import FakeBrowser, FakeClock, FakePointer
+from activitysim.editor import (
+    CODE_REPOS,
+    clone_command,
+    checkout_path,
+    code_sandbox_path,
+    editor_profile_path,
+    CodeDeck,
+    ensure_checkout,
+    find_token,
+    launch_code_command,
+    list_sources,
+    parse_origin_size,
+    real_editor_profile,
+    repo_ok,
+    assert_editor_profile,
+    script_largest_window,
+)
+from activitysim.fakes import FakeBrowser, FakeClock, FakeEditor, FakePointer, FakeWork
 from activitysim.geom import (
     away_from_hot_corners,
     bezier_path,
+    editor_point,
     hover_point,
+    in_editor_body,
     in_tab_strip,
     next_gap,
     pointer_moved,
     tab_strip_point,
     user_left_chrome,
+    user_left_work,
 )
 from activitysim.input import (
     CHAR_KEYS,
@@ -66,7 +86,7 @@ from activitysim.osa import OsaError, as_text
 from activitysim.browse import locate_link, source_link
 from activitysim.places import REPOS, Places, load_url_file, safe_url
 from activitysim.sites import ASTRA, DEEPSWE, SITES, Catalog, allowed_url
-from activitysim.runner import Config, Runner
+from activitysim.runner import CHAPTER_DECK, Config, Runner
 from activitysim.winchrome import (
     AWAKE_FLAGS,
     ES_CONTINUOUS,
@@ -155,6 +175,10 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
     )
     places = Places(rng, overrides.pop("extra", []))
     front = overrides.pop("front", None)
+    editor = FakeEditor()
+    work = FakeWork()
+    browser.attach(pointer)
+    editor.attach(pointer)
     runner = Runner(
         config,
         browser,
@@ -165,6 +189,8 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
         clock=clock.time,
         sleep=clock.sleep,
         focused_role=lambda: "AXTextField",
+        editor=editor,
+        work=work,
     )
     if overrides:
         raise TypeError(f"unexpected {sorted(overrides)}")
@@ -172,7 +198,7 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
 
 
 def prefer_search(runner: Runner) -> None:
-    """Skip the opening benchmark tour and start on GitHub search."""
+    """Skip the opening editor chapter and start on GitHub search."""
 
     runner._started = True
     runner._kinds = ["search", "search", "search", "search"]
@@ -213,6 +239,18 @@ class GeometryTests(unittest.TestCase):
 
     def test_narrow_window_is_not_clicked(self) -> None:
         self.assertIsNone(tab_strip_point((0, 0, 100, 100), [], random.Random(0)))
+        self.assertIsNone(editor_point((0, 0, 200, 200), random.Random(0)))
+
+    def test_editor_point_stays_in_the_text_area(self) -> None:
+        bounds = (40.0, 40.0, 1500.0, 980.0)
+        displays = [(0.0, 0.0, 1728.0, 1117.0)]
+        rng = random.Random(2)
+        for _ in range(80):
+            point = editor_point(bounds, rng)
+            self.assertIsNotNone(point)
+            assert point is not None
+            self.assertTrue(in_editor_body(point, bounds))
+            self.assertTrue(away_from_hot_corners(point, displays))
 
     def test_pointer_moved_and_leaving_chrome(self) -> None:
         self.assertFalse(pointer_moved((0, 0), (10, 10), tolerance=36))
@@ -221,6 +259,10 @@ class GeometryTests(unittest.TestCase):
         self.assertFalse(user_left_chrome(None, "Code"))
         self.assertFalse(user_left_chrome("Google Chrome", "Google Chrome"))
         self.assertTrue(user_left_chrome("Google Chrome", "Code"))
+        self.assertFalse(user_left_work("Code", "Code", "Code"))
+        self.assertTrue(user_left_work("Code", "Notes", "Code"))
+        self.assertFalse(user_left_work("Code", "Notes", None))
+        self.assertFalse(user_left_work("Google Chrome", "Code", "Code"))
 
     def test_bezier_ends_on_the_target(self) -> None:
         rng = random.Random(2)
@@ -502,6 +544,8 @@ class InputPolicyTests(unittest.TestCase):
             pointer.hotkey("not-a-key", ())
         with self.assertRaises(ValueError):
             pointer.hotkey("1", ())
+        with self.assertRaises(ValueError):
+            pointer.hotkey("p", ())
 
     def test_typing_allowlist(self) -> None:
         assert_typable("https://github.com/python/cpython/issues")
@@ -669,38 +713,42 @@ class SearchGeometryTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    def test_session_opens_a_random_benchmark_before_github(self) -> None:
-        homes = {site.home for site in SITES}
-        seen: set[str] = set()
+    def test_session_opens_the_editor_before_sites(self) -> None:
         for seed in range(8):
             runner, browser, pointer, _clock = make_runner(duration=8, seed=seed)
             with redirect_stdout(StringIO()):
                 runner.run()
-            self.assertTrue(browser.window_id)
-            url = opened_url(runner)
-            self.assertIn(url, homes)
-            self.assertFalse(url.startswith("https://github.com/"))
-            seen.add(url)
+            chapters = [line for line in runner.history if line.startswith("chapter ")]
+            self.assertTrue(chapters, runner.history)
+            self.assertTrue(chapters[0].startswith("chapter code "), chapters)
+            self.assertFalse(browser.window_id)
             for text in pointer.typed:
                 self.assertNotIn("javascript:", text)
                 self.assertTrue(can_type(text), text)
-                if "://" in text:
-                    self.assertTrue(allowed_url(text), text)
+                self.assertNotIn("..", text.split("/"))
             for key, mods in pointer.keys:
                 self.assertNotIn(key, {"q", "w", "space"})
-                if key.isdigit() or key == "a":
+                if key.isdigit() or key in {"a", "p"}:
                     self.assertIn("command", mods)
-        self.assertGreater(len(seen), 1)
+            self.assertTrue(any(key == "p" and "command" in mods for key, mods in pointer.keys))
 
-        runner, browser, pointer, _clock = make_runner(duration=400, seed=12)
+        runner, browser, pointer, _clock = make_runner(duration=500, seed=12)
         with redirect_stdout(StringIO()):
             runner.run()
-        self.assertFalse(opened_url(runner).startswith("https://github.com/"))
+        codes = [line for line in runner.history if line.startswith("chapter code ")]
+        githubs = [line for line in runner.history if line.startswith("chapter github")]
+        sites = [line for line in runner.history if line.startswith("chapter site")]
+        self.assertGreater(len(codes), len(githubs))
+        self.assertGreater(len(githubs), len(sites))
+        self.assertGreater(len(sites), 0)
+        self.assertLess(len(sites) * 5, len(codes))
         self.assertTrue(any("advanced search" in line for line in runner.history))
         self.assertIn("result", runner.actions)
+        self.assertTrue(browser.window_id)
         for point in pointer.clicks:
             self.assertTrue(
-                in_search_zone(point, browser.bounds_value)
+                in_editor_body(point, runner.editor.bounds_value)
+                or in_search_zone(point, browser.bounds_value)
                 or in_result_zone(point, browser.bounds_value)
                 or in_readme_zone(point, browser.bounds_value),
                 point,
@@ -736,19 +784,32 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("still in use", text)
         self.assertIn("duration elapsed", text)
 
-    def test_leaving_chrome_pauses_once(self) -> None:
-        calls = {"n": 0}
+    def test_leaving_the_driven_app_pauses_once(self) -> None:
+        runner, _browser, _pointer, clock = make_runner(duration=8, pause=30, seed=6)
+        runner.editor.present = False
+        runner.work.present = False
+        state = {"left": False}
+
+        def sleep(seconds: float) -> None:
+            clock.sleep(seconds)
+            if runner._driving == "Google Chrome":
+                state["left"] = True
 
         def front() -> str:
-            calls["n"] += 1
-            # Startup samples Chrome. The next loop sees that the user left.
-            return "Google Chrome" if calls["n"] < 3 else "Code"
+            return "Notes" if state["left"] else "Google Chrome"
 
-        runner, _browser, _pointer, _clock = make_runner(duration=6, pause=30, seed=6)
+        runner.sleep = sleep
         runner.frontmost = front
         with redirect_stdout(StringIO()):
             runner.run()
         self.assertTrue(any(line.startswith("paused") for line in runner.history))
+
+    def test_opening_the_editor_is_not_the_user_leaving(self) -> None:
+        runner, _browser, _pointer, _clock = make_runner(duration=6, pause=30, seed=6)
+        with redirect_stdout(StringIO()):
+            runner.run()
+        self.assertTrue(any(line.startswith("chapter code ") for line in runner.history))
+        self.assertFalse(any(line.startswith("paused") for line in runner.history))
 
     def test_sleep_ignores_a_clock_that_jumps_past_the_deadline(self) -> None:
         runner, _browser, _pointer, clock = make_runner(duration=5, seed=1)
@@ -765,6 +826,8 @@ class RunnerTests(unittest.TestCase):
 
     def test_signed_in_chrome_is_not_clicked(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=6, pause=30, seed=6)
+        runner.editor.present = False
+        runner.work.present = False
         browser.is_front = lambda: False  # type: ignore[method-assign]
         runner.frontmost = lambda: "Google Chrome"
         with redirect_stdout(StringIO()):
@@ -974,10 +1037,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         text = stdout.getvalue()
         self.assertIn("dry run", text)
+        self.assertIn("chapter code ", text)
         self.assertIn("click", text)
         self.assertIn("scroll", text)
-        self.assertIn("opened Chrome at ", text)
-        self.assertNotIn("opened Chrome at https://github.com/", text)
+        self.assertNotIn("javascript:", text)
 
     def test_help_and_bad_url_file(self) -> None:
         stdout = StringIO()
@@ -1036,6 +1099,7 @@ class WindowsLogicTests(unittest.TestCase):
 
     def test_command_chords_map_to_ctrl_or_alt(self) -> None:
         self.assertEqual(chord("l", ("command",)), [(VK_CONTROL, True), (0x4C, False)])
+        self.assertEqual(chord("p", ("command",)), [(VK_CONTROL, True), (0x50, False)])
         self.assertEqual(chord("a", ("command",)), [(VK_CONTROL, True), (0x41, False)])
         self.assertEqual(chord("left", ("command",)), [(VK_MENU, True), (0x25, False)])
         self.assertEqual(chord("1", ("command",)), [(VK_CONTROL, True), (0x31, False)])
@@ -1068,6 +1132,8 @@ class WindowsLogicTests(unittest.TestCase):
             pointer.hotkey("1", ())
         with self.assertRaises(ValueError):
             pointer.hotkey("a", ())
+        with self.assertRaises(ValueError):
+            pointer.hotkey("p", ())
         with self.assertRaises(ValueError):
             pointer.hotkey("left", ("super",))
         self.assertFalse(pointer.omnibox("javascript:alert(1)"))
@@ -2153,6 +2219,194 @@ class WindowAndInputTests(unittest.TestCase):
         self.assertNotIn("Accessibility", text)
         self.assertNotIn("System Settings", text)
         self.assertNotIn("AXIsProcessTrusted", text)
+
+
+class EditorTests(unittest.TestCase):
+    def test_code_repos_are_public_names(self) -> None:
+        self.assertGreater(len(CODE_REPOS), 20)
+        folded = [repo.lower() for repo in CODE_REPOS]
+        self.assertEqual(len(folded), len(set(folded)))
+        for repo in CODE_REPOS:
+            self.assertTrue(repo_ok(repo), repo)
+            self.assertTrue(can_type(f"https://github.com/{repo}"), repo)
+            self.assertNotIn("..", repo)
+
+    def test_checkout_names_and_commands_stay_in_the_sandbox(self) -> None:
+        self.assertFalse(repo_ok("../etc"))
+        self.assertFalse(repo_ok("pallets/../secrets"))
+        self.assertFalse(repo_ok("pallets/flask/extra"))
+        self.assertFalse(repo_ok("https://github.com/pallets/flask"))
+        self.assertFalse(repo_ok("owner/.."))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = checkout_path(root, "pallets/flask")
+            self.assertEqual(dest, (root / "pallets" / "flask").resolve())
+            command = clone_command("pallets/flask", dest)
+            self.assertEqual(command[0], "git")
+            self.assertEqual(command[command.index("--depth") + 1], "1")
+            self.assertIn("--single-branch", command)
+            self.assertIn("https://github.com/pallets/flask", command)
+            self.assertEqual(command[-1], str(dest))
+            self.assertNotIn("shell", command)
+            with self.assertRaises(ValueError):
+                checkout_path(root, "../etc")
+            with self.assertRaises(ValueError):
+                clone_command("pallets/flask; rm -rf /", dest)
+
+    def test_failed_clone_is_removed_and_a_good_one_is_kept(self) -> None:
+        calls: list[tuple[list[str], dict]] = []
+
+        def run(command, **kwargs):
+            calls.append((list(command), kwargs))
+
+            class Result:
+                returncode = 1
+
+            return Result()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(ensure_checkout("pallets/flask", root, run, timeout=5))
+            self.assertFalse((root / "pallets" / "flask").exists())
+            self.assertEqual(calls[0][1].get("shell", False), False)
+            self.assertIsInstance(calls[0][0], list)
+            self.assertEqual(calls[0][1]["env"]["GIT_TERMINAL_PROMPT"], "0")
+            kept = root / "encode" / "httpx"
+            (kept / ".git").mkdir(parents=True)
+            (kept / "README.md").write_text("hi", encoding="utf-8")
+            self.assertEqual(ensure_checkout("encode/httpx", root, run), kept.resolve())
+            self.assertEqual(len(calls), 1)
+            stray = root / "cli" / "cli"
+            stray.mkdir(parents=True)
+            (stray / "README.md").write_text("leave me", encoding="utf-8")
+            self.assertIsNone(ensure_checkout("cli/cli", root, run))
+            self.assertTrue((stray / "README.md").is_file())
+
+    def test_source_list_skips_dependencies_and_stays_inside(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            outside = Path(tmp) / "outside.py"
+            outside.write_text("secret", encoding="utf-8")
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "app.py").write_text("x", encoding="utf-8")
+            (root / "README.md").write_text("x", encoding="utf-8")
+            nested = root / "node_modules" / "pkg"
+            nested.mkdir(parents=True)
+            (nested / "index.js").write_text("x", encoding="utf-8")
+            (root / ".git").mkdir()
+            (root / "link.py").symlink_to(outside)
+            found = list_sources(root)
+            self.assertEqual(found, ["README.md", "src/app.py"])
+            self.assertEqual(find_token("src/app.py"), "app")
+            self.assertEqual(find_token("README.md"), "README")
+            self.assertEqual(find_token("a"), "")
+
+    def test_editor_profile_is_not_the_signed_in_one(self) -> None:
+        home = Path("/Users/me")
+        env = {"LOCALAPPDATA": r"C:\Users\me\AppData\Local", "APPDATA": r"C:\Users\me\AppData\Roaming"}
+        real = real_editor_profile("darwin", {}, home)
+        self.assertEqual(real, home / "Library/Application Support/Code")
+        profile = editor_profile_path("darwin", {}, home)
+        sandbox = code_sandbox_path("darwin", {}, home)
+        self.assertIn("activitysim", profile.parts)
+        self.assertIn("activitysim", sandbox.parts)
+        self.assertNotEqual(profile, real)
+        self.assertNotEqual(profile, sandbox)
+        with self.assertRaises(ValueError):
+            assert_editor_profile(real, real)
+        win_home = Path(r"C:\Users\me")
+        win_real = real_editor_profile("win32", env, win_home)
+        self.assertEqual(win_real, Path(env["APPDATA"]) / "Code")
+        win_profile = editor_profile_path("win32", env, win_home)
+        self.assertEqual(win_profile, Path(env["LOCALAPPDATA"]) / "activitysim" / "vscode")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "checkout"
+            folder.mkdir()
+            other = root / "vscode"
+            command = launch_code_command(
+                Path("/Applications/Visual Studio Code.app/Contents/MacOS/Code"),
+                folder,
+                other,
+                real,
+            )
+            self.assertIn("--new-window", command)
+            self.assertIn("--disable-workspace-trust", command)
+            self.assertIn(f"--user-data-dir={other.resolve()}", command)
+            self.assertEqual(command[-1], str(folder.resolve()))
+            with self.assertRaises(ValueError):
+                launch_code_command(Path("Code"), folder, real, real)
+            with self.assertRaises(ValueError):
+                launch_code_command(Path("Code"), other, other, real)
+        script = script_largest_window(42)
+        self.assertIn("unix id is 42", script)
+        self.assertNotIn("keystroke", script)
+        self.assertNotIn("key code", script)
+        self.assertEqual(parse_origin_size("10 20 800 600"), (10.0, 20.0, 810.0, 620.0))
+        self.assertIsNone(parse_origin_size("0 0 10 10"))
+
+    def test_code_deck_does_not_repeat_until_it_is_used(self) -> None:
+        deck = CodeDeck(random.Random(3), ("pallets/flask", "encode/httpx", "cli/cli"))
+        names = [deck.next() for _ in range(3)]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_later_chapters_are_six_editor_three_github_one_site(self) -> None:
+        self.assertEqual(CHAPTER_DECK.count("code"), 6)
+        self.assertEqual(CHAPTER_DECK.count("github"), 3)
+        self.assertEqual(CHAPTER_DECK.count("site"), 1)
+        runner, _browser, _pointer, _clock = make_runner(duration=1, seed=1)
+        runner._started = True
+        kinds = [runner._next_kind() for _ in range(50)]
+        self.assertEqual(kinds.count("code"), 30)
+        self.assertEqual(kinds.count("github"), 15)
+        self.assertEqual(kinds.count("site"), 5)
+
+    def test_quick_open_types_a_file_only_while_the_editor_is_front(self) -> None:
+        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        with redirect_stdout(StringIO()):
+            runner._quick_open("src/app.py")
+        self.assertIn(("p", ("command",)), pointer.keys)
+        self.assertIn("src/app.py", pointer.typed)
+        self.assertNotIn(("p", ()), pointer.keys)
+
+        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        runner.editor._front = False
+        with redirect_stdout(StringIO()):
+            runner._quick_open("src/app.py")
+            runner._quick_open("../secrets.txt")
+        self.assertEqual(pointer.keys, [])
+        self.assertEqual(pointer.typed, [])
+
+    def test_a_file_read_scrolls_inside_the_editor(self) -> None:
+        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        runner.code_files = ["src/app.py"]
+        runner.code_i = 0
+        runner.rng.random = lambda: 0.0  # type: ignore[method-assign]
+        with redirect_stdout(StringIO()):
+            runner._read_code()
+        self.assertIn("read", runner.actions)
+        self.assertGreaterEqual(len(pointer.scrolls), 2)
+        self.assertTrue(pointer.clicks)
+        for point in pointer.clicks:
+            self.assertTrue(in_editor_body(point, runner.editor.bounds_value))
+        moves = [key for key, _mods in pointer.keys if key in {"down", "up", "pagedown", "pageup"}]
+        self.assertGreaterEqual(len(moves), 4)
+
+    def test_without_an_editor_the_session_starts_on_github(self) -> None:
+        runner, _browser, _pointer, _clock = make_runner(duration=8, seed=2)
+        runner.editor.present = False
+        with redirect_stdout(StringIO()):
+            runner.run()
+        chapters = [line for line in runner.history if line.startswith("chapter ")]
+        self.assertTrue(chapters[0].startswith("chapter github"))
+        self.assertFalse(any(line.startswith("chapter code ") for line in runner.history))
+        self.assertFalse(any(line.startswith("chapter site") for line in runner.history))
 
 
 if __name__ == "__main__":

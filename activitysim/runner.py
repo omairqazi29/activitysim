@@ -1,10 +1,10 @@
-"""Drive the signed-out Chrome with real pointer and keyboard events.
+"""Drive the editor and the signed-out Chrome with real pointer and keyboard events.
 
-A session opens a random public benchmark site first. Later chapters mix
-more of those sites with GitHub searches and repositories it has not already
-used. AppleScript and the debugger only open the window and read the page.
-The clicks and keystrokes are real input. A normal run prints one line when
-the window opens. Errors are printed on their own.
+A session checks out a public repository and opens it in Visual Studio Code
+first. Later chapters are mostly that editor, then GitHub, and about one
+chapter in ten is a benchmark site. AppleScript and the debugger only open
+windows and read pages. The clicks and keystrokes are real input. A normal
+run prints one line when the first window opens. Errors are printed on their own.
 """
 
 from __future__ import annotations
@@ -15,7 +15,14 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from activitysim.geom import away_from_hot_corners, pointer_moved, user_left_chrome
+from activitysim.editor import find_token
+from activitysim.geom import (
+    away_from_hot_corners,
+    editor_point,
+    in_editor_body,
+    pointer_moved,
+    user_left_work,
+)
 from activitysim.input import can_type
 from activitysim.osa import OsaError
 from activitysim.places import repo_name
@@ -34,6 +41,21 @@ from activitysim.search import (
 from activitysim.sites import Catalog, allowed_url, page_label
 
 TEXT_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"})
+
+# Six editor chapters, three GitHub chapters, one benchmark site.
+CHAPTER_DECK = (
+    "code",
+    "code",
+    "code",
+    "code",
+    "code",
+    "code",
+    "github",
+    "github",
+    "github",
+    "site",
+)
+SITE_PAGES = 3
 
 
 def _in_window(point: tuple[float, float], bounds: tuple[float, float, float, float]) -> bool:
@@ -73,6 +95,8 @@ class Runner:
         find_results=None,
         find_link=None,
         find_source=None,
+        editor=None,
+        work=None,
     ) -> None:
         self.config = config
         self.browser = browser
@@ -87,6 +111,8 @@ class Runner:
         self.find_results = find_results
         self.find_link = find_link
         self.find_source = find_source
+        self.editor = editor
+        self.work = work
         self.queries = QueryDeck(self.rng)
         self.catalog = Catalog(self.rng)
         self.history: list[str] = []
@@ -113,6 +139,12 @@ class Runner:
         self.repo_phase = "open"
         self.repo_reads = 0
         self._sourced = False
+        self._driving: str | None = None
+        self._github_repo = True
+        self.code_files: list[str] = []
+        self.code_i = 0
+        self.code_phase = "open"
+        self.code_reads = 0
 
     def log(self, message: str, *, error: bool = False) -> None:
         self.history.append(message)
@@ -175,7 +207,7 @@ class Runner:
         if self.config.dry_run:
             self.log("dry run, nothing will move and Chrome will not open")
         else:
-            self.log("a random benchmark site first, then GitHub and the other sites")
+            self.log("the editor first, then GitHub, and a benchmark site about one time in ten")
         self.log("Ctrl+C stops the simulator. power settings are not changed")
         if not self.config.dry_run:
             if sys.platform == "win32":
@@ -234,6 +266,9 @@ class Runner:
         elif self.mode == "repo":
             if self._repo_continues():
                 return
+        elif self.mode == "code":
+            if self._code_continues():
+                return
         elif self.mode == "results" and self.pi < min(len(self.points), self.per_query):
             self._open_result()
             return
@@ -242,28 +277,232 @@ class Runner:
     def _begin_chapter(self) -> None:
         if not self._started:
             self._started = True
-            self._start_tour()
+            if self._code_available():
+                self._start_code()
+            else:
+                self._start_github()
             return
         kind = self._next_kind()
-        if kind == "tour":
+        if kind in {"site", "tour"}:
             self._start_tour()
         elif kind == "repo":
             self._start_repo()
-        else:
+        elif kind == "search":
             self._search()
+        elif kind == "code":
+            self._start_code()
+        else:
+            self._start_github()
 
     def _next_kind(self) -> str:
         if not self._kinds:
-            kinds = ["tour", "repo", "tour", "repo", "search"]
+            kinds = list(CHAPTER_DECK)
             self.rng.shuffle(kinds)
             self._kinds = kinds
         return self._kinds.pop()
+
+    def _code_available(self) -> bool:
+        if self.editor is None or self.work is None:
+            return False
+        try:
+            return bool(self.editor.installed()) and bool(self.work.ready())
+        except (OSError, OsaError, ValueError, AttributeError):
+            return False
+
+    def _start_github(self) -> None:
+        self.log("chapter github")
+        if self._github_repo:
+            self._github_repo = False
+            self._start_repo()
+            return
+        self._github_repo = True
+        self._search()
+
+    def _start_code(self) -> None:
+        if not self._code_available():
+            self._start_github()
+            return
+        try:
+            repo = self.work.next_repo()
+            folder = self.work.checkout(repo)
+        except (OSError, OsaError, ValueError, AttributeError):
+            self._start_github()
+            return
+        if not folder:
+            self.log(f"skip checkout {repo}")
+            self._start_github()
+            return
+        try:
+            found = self.work.files(folder) or []
+        except (OSError, OsaError, ValueError, AttributeError):
+            found = []
+        files = [
+            path
+            for path in found
+            if isinstance(path, str) and can_type(path) and ".." not in path.split("/")
+        ]
+        if not files:
+            self.log(f"skip checkout {repo}")
+            self._start_github()
+            return
+        self.rng.shuffle(files)
+        count = min(len(files), self.rng.randint(4, 6))
+        self.code_files = files[:count]
+        self.code_i = 0
+        self.code_phase = "open"
+        self.code_reads = 0
+        self.mode = "code"
+        try:
+            self.editor.open_folder(str(folder))
+        except (OSError, OsaError, ValueError) as exc:
+            self.log(f"step failed: {exc}", error=True)
+            self._start_github()
+            return
+        self._announce()
+        self.actions.append("code")
+        self.log(f"checkout {repo}")
+        self.log(f"chapter code {repo}")
+        self._code_continues()
+
+    def _code_continues(self) -> bool:
+        if self.code_phase == "read" and self.code_reads > 0:
+            self._read_code()
+            self.code_reads -= 1
+            if self.code_reads == 0:
+                self.code_i += 1
+                self.code_phase = "open"
+            return True
+        if self.code_i >= len(self.code_files):
+            return False
+        self._quick_open(self.code_files[self.code_i])
+        self.code_reads = self.rng.randint(2, 3)
+        self.code_phase = "read"
+        return True
+
+    def _quick_open(self, relative: str) -> None:
+        if not can_type(relative) or ".." in relative.split("/") or relative.startswith("/"):
+            return
+        if not (self.can_keys and self._arm_editor()):
+            self.log("skipped keys, the editor is not in front")
+            return
+        self.pointer.hotkey("p", ("command",))
+        self._sleep(0.12)
+        if not self._editor_is_front():
+            self.log("skipped keys, the editor is not in front")
+            return
+        self.pointer.type_text(relative)
+        self.pointer.hotkey("return", ())
+        self.actions.append("edit")
+        self.log(f"open {relative}")
+
+    def _read_code(self) -> None:
+        self.actions.append("read")
+        if not self._arm_editor():
+            self.log("skipped keys, the editor is not in front")
+            return
+        bounds = self._editor_bounds()
+        if bounds is not None and self.can_point:
+            point = editor_point(bounds, self.rng)
+            displays = self._displays()
+            if (
+                point is not None
+                and in_editor_body(point, bounds)
+                and (not displays or away_from_hot_corners(point, displays))
+            ):
+                self.pointer.move_to(*point)
+                for _ in range(2):
+                    if not self._editor_is_front():
+                        self.log("skipped keys, the editor is not in front")
+                        return
+                    self.pointer.scroll(self._scroll_delta())
+                    self._sleep(self.rng.uniform(0.03, 0.08))
+                self.log("scroll the file")
+                if self.rng.random() < 0.45:
+                    self._press_in_editor(point, "inside the file")
+        if not (self.can_keys and self._editor_is_front()):
+            return
+        key = self.rng.choice(("down", "down", "down", "pagedown", "pagedown", "up"))
+        count = self.rng.randint(4, 8)
+        for _ in range(count):
+            if not self._editor_is_front():
+                self.log("skipped keys, the editor is not in front")
+                return
+            self.pointer.hotkey(key, ())
+            self._sleep(self.rng.uniform(0.03, 0.08))
+        self.log(f"key {key} x{count}")
+        if self.rng.random() < 0.35 and self.code_i < len(self.code_files):
+            self._find_in_file(self.code_files[self.code_i])
+
+    def _find_in_file(self, relative: str) -> None:
+        token = find_token(relative)
+        if not token or not self._editor_is_front():
+            return
+        self.pointer.hotkey("f", ("command",))
+        self._sleep(0.08)
+        if not self._editor_is_front():
+            self.log("skipped keys, the editor is not in front")
+            return
+        self.pointer.type_text(token)
+        self.pointer.hotkey("escape", ())
+        self.log(f"find {token}")
+
+    def _press_in_editor(self, point: tuple[float, float], label: str) -> bool:
+        if not self.can_point or not self._editor_is_front():
+            return False
+        self.pointer.move_to(point[0], point[1])
+        self._sleep(self.rng.uniform(0.05, 0.15))
+        if not self._editor_is_front():
+            self.log("skipped click, the editor is not in front")
+            return False
+        self.pointer.click(point[0], point[1])
+        self.log(f"click {label}")
+        return True
+
+    def _arm_editor(self) -> bool:
+        if self.editor is None:
+            return False
+        try:
+            self.editor.activate()
+        except (OSError, OsaError, ValueError):
+            return False
+        if not self._editor_is_front():
+            return False
+        self._mark_driving()
+        return True
+
+    def _editor_is_front(self) -> bool:
+        if self.editor is None:
+            return False
+        check = getattr(self.editor, "is_front", None)
+        if not callable(check):
+            return False
+        try:
+            return bool(check())
+        except (OSError, OsaError, ValueError):
+            return False
+
+    def _editor_bounds(self):
+        if self.editor is None:
+            return None
+        try:
+            return self.editor.bounds()
+        except (OsaError, OSError, ValueError):
+            return None
+
+    def _mark_driving(self) -> None:
+        try:
+            name = self.frontmost()
+        except (OSError, ValueError):
+            return
+        if name:
+            self._driving = name
+            self._last_front = name
 
     def _start_tour(self) -> None:
         if self.places is not None:
             self.places.leave_page()
             self.places.plan_repo(None)
-        self.tour_urls = self.catalog.tour()
+        self.tour_urls = self.catalog.tour()[:SITE_PAGES]
         self.tour_i = 0
         self.tour_phase = "open"
         self.tour_reads = 0
@@ -271,6 +510,7 @@ class Runner:
         if not self.tour_urls:
             self._search()
             return
+        self.log("chapter site")
         self._tour_continues()
 
     def _tour_continues(self) -> bool:
@@ -662,7 +902,10 @@ class Runner:
 
     def _arm(self) -> bool:
         self._activate()
-        return self._our_window_is_front()
+        if not self._our_window_is_front():
+            return False
+        self._mark_driving()
+        return True
 
     def _activate(self) -> None:
         self.browser.activate()
@@ -675,8 +918,13 @@ class Runner:
 
     def _note_front(self) -> None:
         front = self.frontmost()
-        if front is not None:
-            self._last_front = front
+        if front is None:
+            return
+        # A departure has to stay visible until the next pause check. Recording
+        # the user's app here would hide the switch.
+        if self._driving and front != self._driving:
+            return
+        self._last_front = front
 
     def _remember(self) -> None:
         self._last_pos = self.pointer.position()
@@ -685,7 +933,7 @@ class Runner:
         current = self.pointer.position()
         moved = pointer_moved(self._last_pos, current, self.config.tolerance)
         front = self.frontmost()
-        left = user_left_chrome(self._last_front, front)
+        left = user_left_work(self._last_front, front, self._driving)
         self._last_pos = current
         if front is not None:
             self._last_front = front
@@ -734,6 +982,8 @@ class Runner:
         if self.mode == "tour" and self.tour_phase == "read" and self.tour_reads > 0:
             return True
         if self.mode == "repo" and self.repo_phase == "read" and self.repo_reads > 0:
+            return True
+        if self.mode == "code" and self.code_phase == "read" and self.code_reads > 0:
             return True
         return self.mode == "results" and self.pi < min(len(self.points), self.per_query)
 

@@ -19,10 +19,51 @@ def pointer_moved(previous: Point | None, current: Point | None, tolerance: floa
     return math.hypot(current[0] - previous[0], current[1] - previous[1]) > tolerance
 
 
+def user_left_work(
+    last_front: str | None,
+    front: str | None,
+    driving: str | None,
+) -> bool:
+    """True when the app we were driving is no longer the front app.
+
+    Switching to the editor ourselves updates `driving`, so that switch is not
+    treated as the user leaving.
+    """
+
+    if not driving or last_front != driving:
+        return False
+    return front not in (None, driving)
+
+
 def user_left_chrome(last_front: str | None, front: str | None) -> bool:
     """True when Chrome was front at the end of our last action and no longer is."""
 
-    return last_front == "Google Chrome" and front not in (None, "Google Chrome")
+    return user_left_work(last_front, front, "Google Chrome")
+
+
+def in_editor_body(point: Point, bounds: Rect) -> bool:
+    """The text area: below the title bar, right of the sidebar, above the status bar."""
+
+    x, y = point
+    left, top, right, bottom = bounds
+    return (left + 220) <= x <= (right - 24) and (top + 70) <= y <= (bottom - 36)
+
+
+def editor_point(bounds: Rect, rng: random.Random) -> Point | None:
+    """A point in the editor text area. It is not the title bar or the activity bar."""
+
+    left, top, right, bottom = bounds
+    if right - left < 500 or bottom - top < 320:
+        return None
+    x0, y0 = left + 220, top + 70
+    x1, y1 = right - 24, bottom - 36
+    if x1 <= x0 or y1 <= y0:
+        return None
+    for _ in range(8):
+        point = (rng.uniform(x0, x1), rng.uniform(y0, y1))
+        if in_editor_body(point, bounds):
+            return point
+    return None
 
 
 def away_from_hot_corners(point: Point, displays: list[Rect], margin: float = 80) -> bool:
