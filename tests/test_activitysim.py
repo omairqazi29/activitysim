@@ -21,7 +21,7 @@ from io import StringIO
 from pathlib import Path
 
 from activitysim.ax import chrome_pid, set_chrome_pid
-from activitysim.cdp import CdpError, call
+from activitysim.cdp import CdpError, call, open_page
 from activitysim.chrome import (
     LOCKED_PROFILE,
     REAL_PROFILE,
@@ -39,6 +39,7 @@ from activitysim.chrome import (
     script_activate,
     script_bounds,
     script_front_pid,
+    choose_page,
     script_fullscreen,
     scrub_signins,
 )
@@ -52,12 +53,18 @@ from activitysim.editor import (
     CodeDeck,
     ensure_checkout,
     find_token,
+    code_process_argv,
+    editor_pids_from_ps,
+    editor_pids_from_rows,
     launch_code_command,
     list_sources,
+    matches_editor_command,
     parse_origin_size,
+    prepare_profile,
     real_editor_profile,
     repo_ok,
     assert_editor_profile,
+    script_editor_fullscreen,
     script_largest_window,
 )
 from activitysim.fakes import FakeBrowser, FakeClock, FakeEditor, FakePointer, FakeWork
@@ -92,6 +99,7 @@ from activitysim.winchrome import (
     ES_CONTINUOUS,
     ES_DISPLAY_REQUIRED,
     ES_SYSTEM_REQUIRED,
+    SW_MAXIMIZE,
     SW_RESTORE,
     WM_CLOSE,
     app_name_for_image,
@@ -426,11 +434,61 @@ class LockedChromeTests(unittest.TestCase):
             cookies.write_text("session", encoding="utf-8")
             link = profile / "Default" / "Login Data"
             link.symlink_to(outside)
+            encrypted = profile / "Default" / "Sessions_Encrypted"
+            encrypted.mkdir()
+            (encrypted / "Session_1").write_text("old windows", encoding="utf-8")
             scrub_signins(profile)
             self.assertFalse(cookies.exists())
             self.assertFalse(link.exists())
+            self.assertFalse(encrypted.exists())
             self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
             self.assertTrue((profile / "First Run").is_file())
+
+    def test_navigate_replaces_a_dead_page_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            browser = Chrome(Path(tmp) / "locked")
+            browser.pid = 42
+            browser.port = 9333
+            browser._ws = "ws://127.0.0.1:9333/devtools/page/DEAD"
+            seen: list[str] = []
+
+            def fake_call(ws, _method, _params=None, timeout=5):
+                seen.append(ws)
+                if ws.endswith("DEAD"):
+                    raise CdpError("debugger refused the connection: HTTP/1.1 500")
+                return {"frameId": "1"}
+
+            live = {
+                "id": "LIVE",
+                "type": "page",
+                "url": "https://example.com/",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/LIVE",
+            }
+            with patch("activitysim.chrome._is_our_process", return_value=True), patch(
+                "activitysim.chrome.call", side_effect=fake_call
+            ), patch("activitysim.chrome.list_pages", return_value=[]), patch(
+                "activitysim.chrome.open_page", return_value=live
+            ), patch.object(browser, "_enter_fullscreen") as fullscreen:
+                browser.navigate("https://example.com/")
+            self.assertEqual(
+                seen,
+                [
+                    "ws://127.0.0.1:9333/devtools/page/DEAD",
+                    "ws://127.0.0.1:9333/devtools/page/LIVE",
+                ],
+            )
+            self.assertEqual(browser._ws, "ws://127.0.0.1:9333/devtools/page/LIVE")
+            fullscreen.assert_called_once()
+            blank = {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9/devtools/page/B"}
+            popup = {
+                "type": "page",
+                "url": "chrome://omnibox-popup.top-chrome/",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9/devtools/page/P",
+            }
+            page = {"type": "page", "url": "https://github.com", "webSocketDebuggerUrl": "ws://127.0.0.1:9/devtools/page/G"}
+            self.assertEqual(choose_page([popup, blank, page]), page)
+            self.assertIsNone(choose_page([popup, blank]))
+            self.assertIsNone(choose_page([{"type": "page", "url": "https://example.com", "webSocketDebuggerUrl": "ws://example.com/x"}]))
 
     def test_accessibility_pid_never_guesses_a_chrome(self) -> None:
         set_chrome_pid(None)
@@ -532,6 +590,91 @@ class LockedChromeTests(unittest.TestCase):
         self.assertIn(b"Runtime.evaluate", box["client"])
         with self.assertRaises(CdpError):
             call("ws://example.com/devtools/page/ABC", "Runtime.evaluate")
+
+    def test_a_refused_debugger_includes_the_status(self) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def serve() -> None:
+            conn, _addr = server.accept()
+            with conn:
+                data = bytearray()
+                while b"\r\n\r\n" not in data:
+                    data.extend(conn.recv(4096))
+                conn.sendall(
+                    b"HTTP/1.1 500 Internal Server Error\r\n"
+                    b"Content-Length: 22\r\n\r\n"
+                    b"No such target id: DEAD"
+                )
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            with self.assertRaises(CdpError) as caught:
+                call(f"ws://127.0.0.1:{port}/devtools/page/DEAD", "Page.navigate")
+        finally:
+            thread.join(timeout=5)
+            server.close()
+        self.assertIn("500", str(caught.exception))
+        self.assertIn("No such target id", str(caught.exception))
+
+    def test_open_page_puts_and_retries_get_when_put_is_rejected(self) -> None:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_PUT(self):
+                self.server.methods.append("PUT")
+                if self.server.reject_put:
+                    body = b"method"
+                    self.send_response(405)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                body = (
+                    b'{"id":"A","type":"page",'
+                    b'"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/page/A"}'
+                )
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.server.methods.append("GET")
+                body = (
+                    b'{"id":"B","type":"page",'
+                    b'"webSocketDebuggerUrl":"ws://127.0.0.1:1/devtools/page/B"}'
+                )
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        server.methods = []
+        server.reject_put = False
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            page = open_page(port, "https://example.com")
+            self.assertEqual(server.methods, ["PUT"])
+            self.assertEqual(page["id"], "A")
+            server.methods.clear()
+            server.reject_put = True
+            page = open_page(port, "https://example.com")
+            self.assertEqual(server.methods, ["PUT", "GET"])
+            self.assertEqual(page["id"], "B")
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+            server.server_close()
 
 
 class InputPolicyTests(unittest.TestCase):
@@ -1758,7 +1901,9 @@ class WindowAndInputTests(unittest.TestCase):
             self.assertEqual(winchrome.window_bounds(42), (10.0, 10.0, 900.0, 700.0))
             self.assertNotEqual(winchrome.window_bounds(42), (0.0, 0.0, 450.0, 320.0))
             winchrome.request_close(42)
+            winchrome.maximize(42)
         self.assertEqual(fake.closed, [(5, WM_CLOSE)])
+        self.assertIn((5, SW_MAXIMIZE), fake.shown)
 
     def test_chrome_window_methods_on_win32(self) -> None:
         browser = Chrome.__new__(Chrome)
@@ -2330,7 +2475,8 @@ class EditorTests(unittest.TestCase):
                 other,
                 real,
             )
-            self.assertIn("--new-window", command)
+            self.assertIn("--reuse-window", command)
+            self.assertNotIn("--new-window", command)
             self.assertIn("--disable-workspace-trust", command)
             self.assertIn(f"--user-data-dir={other.resolve()}", command)
             self.assertEqual(command[-1], str(folder.resolve()))
@@ -2339,9 +2485,100 @@ class EditorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launch_code_command(Path("Code"), other, other, real)
         script = script_largest_window(42)
+        full = script_editor_fullscreen(42)
         self.assertIn("unix id is 42", script)
-        self.assertNotIn("keystroke", script)
-        self.assertNotIn("key code", script)
+        self.assertIn("Enter Full Screen", full)
+        self.assertIn("AXFullScreen", full)
+        for text in (script, full):
+            self.assertNotIn("keystroke", text)
+            self.assertNotIn("key code", text)
+        if shutil.which("osacompile") is not None:
+            with tempfile.TemporaryDirectory() as compiled:
+                source = Path(compiled) / "full.applescript"
+                output = Path(compiled) / "full.scpt"
+                source.write_text(full, encoding="utf-8")
+                result = subprocess.run(
+                    ["osacompile", "-o", str(output), str(source)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        home = Path("/Users/me")
+        real = real_editor_profile("darwin", {}, home)
+        signed = "/Applications/Visual Studio Code.app/Contents/MacOS/Code"
+        profile = Path("/tmp/activitysim-vscode")
+        ours = f"{signed} --reuse-window --user-data-dir={profile} /tmp/repo"
+        helper = f"{signed} --type=renderer --user-data-dir={profile}"
+        chrome = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+            f"--user-data-dir={profile}"
+        )
+        listing = "\n".join([
+            f"10 {signed}",
+            f"20 {ours}",
+            f"30 {helper}",
+            f"40 {chrome}",
+        ])
+        self.assertEqual(editor_pids_from_ps(listing, profile), [20])
+        self.assertFalse(matches_editor_command(signed, profile))
+        win = (
+            '"C:\\Users\\me\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe" '
+            f"--user-data-dir={profile}"
+        )
+        self.assertEqual(editor_pids_from_rows(f"21\t{win}\n22\t{helper}", profile), [21])
+        argv = code_process_argv()
+        self.assertIn("Code.exe", " ".join(argv))
+        self.assertIn("-NoProfile", argv)
+        self.assertNotIn(str(profile), " ".join(argv))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "vscode"
+            settings = root / "User" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text('{"editor.fontSize": 14, "extensions.autoUpdate": "off"}\n', encoding="utf-8")
+            prepare_profile(root, real)
+            saved = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(saved["editor.fontSize"], 14)
+            self.assertEqual(saved["window.restoreWindows"], "none")
+            self.assertIs(saved["window.restoreFullscreen"], True)
+        from activitysim.editor import CodeEditor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "repo"
+            folder.mkdir()
+            profile_dir = Path(tmp) / "vscode"
+            binary = Path(tmp) / "Code"
+            binary.write_text("", encoding="utf-8")
+            popped: list[list[str]] = []
+
+            class Proc:
+                pid = 4242
+
+                def poll(self):
+                    return None
+
+            def popen(command, **_kwargs):
+                popped.append(command)
+                return Proc()
+
+            editor = CodeEditor()
+            with patch("activitysim.editor.find_code", return_value=binary), patch(
+                "activitysim.editor.editor_profile_path", return_value=profile_dir
+            ), patch("activitysim.editor.editor_pids", return_value=[4242]), patch(
+                "activitysim.editor.stop_editor"
+            ) as stopped, patch(
+                "activitysim.editor.subprocess.Popen", side_effect=popen
+            ), patch.object(CodeEditor, "enter_fullscreen") as fullscreen:
+                editor.open_folder(str(folder))
+                self.assertIn("--reuse-window", popped[0])
+                self.assertNotIn("--new-window", popped[0])
+                stopped.assert_called_once()
+                fullscreen.assert_called_once()
+                stopped.reset_mock()
+                fullscreen.reset_mock()
+                editor.open_folder(str(folder))
+                stopped.assert_not_called()
+                fullscreen.assert_called_once()
         self.assertEqual(parse_origin_size("10 20 800 600"), (10.0, 20.0, 810.0, 620.0))
         self.assertIsNone(parse_origin_size("0 0 10 10"))
 

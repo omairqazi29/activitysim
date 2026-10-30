@@ -2,7 +2,7 @@
 
 A small program for macOS and Windows that looks like someone is using the
 machine. It checks out a public GitHub repository and opens that folder in
-its **own** Visual Studio Code window, then uses a separate signed-out Google
+its **own** fullscreen Visual Studio Code window, then uses a separate signed-out Google
 Chrome for GitHub and, less often, public benchmark sites. The clicks and
 keystrokes are real input events. An idle check that only watches the pointer
 and keyboard will see them. Changing a tab with AppleScript alone will not.
@@ -54,8 +54,9 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
 - Asks for Accessibility if the pointer cannot move yet, opens that Settings
   pane, and waits until the switch is on.
 - Checks out one modest public repository with a shallow `git clone` into
-  its own folder, then opens that folder in a separate Visual Studio Code
-  window. That window uses activitysim's profile, not the Code you are
+  its own folder, then opens that folder in one fullscreen Visual Studio Code
+  window. Later repositories reuse that window instead of opening another.
+  The window uses activitysim's profile, not the Code you are
   signed into. It opens source files with Quick Open, scrolls, moves through
   the text, and sometimes searches in the file. It does not save. If that
   window opens, the program prints `launching dev browser` and then stays

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Mapping
 
 from activitysim.ax import content_bounds, enable_web_content, set_chrome_pid
-from activitysim.cdp import CdpError, activate_page, call, close_page, list_pages, open_page
+from activitysim.cdp import CdpError, _local_ws, activate_page, call, close_page, list_pages, open_page
 from activitysim.osa import OsaError, run_osascript
 from activitysim.places import safe_url
 
@@ -104,6 +104,11 @@ _AUTH_PATHS = (
     "Default/Extension Cookies-journal",
     "Default/Network",
     "Default/Sessions",
+    "Default/Sessions_Encrypted",
+    "Default/Current Session",
+    "Default/Last Session",
+    "Default/Current Tabs",
+    "Default/Last Tabs",
     "Default/Session Storage",
     "Default/Local Storage",
     "Default/IndexedDB",
@@ -242,6 +247,26 @@ tell application "System Events"
   end tell
 end tell
 """
+
+
+def choose_page(pages: list[dict]) -> dict | None:
+    """The http(s) page to drive. chrome:// popups are not the window."""
+
+    web: list[dict] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        socket_url = str(page.get("webSocketDebuggerUrl") or "")
+        if not _local_ws(socket_url):
+            continue
+        if page.get("type") not in (None, "page"):
+            continue
+        url = str(page.get("url") or "")
+        if url.startswith("https://") or url.startswith("http://"):
+            web.append(page)
+    if not web:
+        return None
+    return web[-1]
 
 
 def script_front_pid() -> str:
@@ -503,7 +528,10 @@ class Chrome:
         try:
             self._wait_until_ours()
             pages = self._wait_for_pages()
-            self._ws = str(pages[0].get("webSocketDebuggerUrl") or "")
+            chosen = choose_page(pages)
+            if chosen is None:
+                raise ChromeError("signed-out Chrome did not open a window")
+            self._ws = str(chosen.get("webSocketDebuggerUrl") or "")
             self.window_id = str(self.pid)
             if sys.platform != "win32":
                 set_chrome_pid(self.pid)
@@ -511,9 +539,11 @@ class Chrome:
             call(self._ws, "Page.reload", {})
             self._wait_until_loaded()
             self._enter_fullscreen()
-        except (ChromeError, CdpError, OSError):
+        except (ChromeError, CdpError, OSError) as exc:
             self.close_window()
-            raise
+            if isinstance(exc, ChromeError):
+                raise
+            raise ChromeError(str(exc)) from exc
         return self.window_id
 
     def activate(self) -> None:
@@ -545,9 +575,7 @@ class Chrome:
         return front.isdigit() and int(front) == self.pid
 
     def current_url(self) -> str:
-        self._require_page()
-        result = call(
-            self._ws,
+        result = self._invoke(
             "Runtime.evaluate",
             {"expression": "location.href", "returnByValue": True},
         )
@@ -557,9 +585,7 @@ class Chrome:
     def evaluate(self, expression: str):
         """Run JavaScript in the signed-out page and return the JSON value."""
 
-        self._require_page()
-        result = call(
-            self._ws,
+        result = self._invoke(
             "Runtime.evaluate",
             {"expression": expression, "returnByValue": True},
         )
@@ -598,8 +624,7 @@ class Chrome:
 
     def navigate(self, url: str) -> None:
         _require_url(url)
-        self._require_page()
-        call(self._ws, "Page.navigate", {"url": url})
+        self._invoke("Page.navigate", {"url": url}, recover_url=url)
 
     def switch_tab(self, index: int) -> None:
         pages = self._pages()
@@ -617,18 +642,17 @@ class Chrome:
         self._remember_page()
 
     def back(self) -> None:
-        self._require_page()
-        call(self._ws, "Runtime.evaluate", {"expression": "history.back()", "returnByValue": True})
+        self._invoke(
+            "Runtime.evaluate",
+            {"expression": "history.back()", "returnByValue": True},
+        )
 
     def reload(self) -> None:
-        self._require_page()
-        call(self._ws, "Page.reload", {})
+        self._invoke("Page.reload", {})
 
     def scroll_by(self, pixels: int) -> bool:
-        self._require_page()
         amount = int(pixels)
-        call(
-            self._ws,
+        self._invoke(
             "Runtime.evaluate",
             {"expression": f"window.scrollBy(0, {amount})", "returnByValue": True},
         )
@@ -705,7 +729,7 @@ class Chrome:
             except CdpError:
                 time.sleep(0.2)
                 continue
-            if pages:
+            if choose_page(pages):
                 return pages
             time.sleep(0.2)
         raise ChromeError("signed-out Chrome did not open a window")
@@ -718,9 +742,58 @@ class Chrome:
             raise ChromeError(str(exc)) from exc
 
     def _remember_page(self) -> None:
-        pages = self._pages()
-        if pages:
-            self._ws = str(pages[-1].get("webSocketDebuggerUrl") or "")
+        chosen = choose_page(self._pages())
+        if chosen:
+            self._ws = str(chosen.get("webSocketDebuggerUrl") or "")
+
+    def _invoke(self, method: str, params: dict | None = None, *, recover_url: str | None = None) -> dict:
+        """Send one command. A dead page target is replaced once, then the error is raised.
+
+        Chrome drops the id after the tab closes and answers the old socket with
+        HTTP 500. Listing pages again finds the live one. Navigation can open a
+        replacement when none are left.
+        """
+
+        self._require_port()
+        last: Exception | None = None
+        sockets: list[str] = []
+        if self._ws:
+            sockets.append(self._ws)
+        try:
+            chosen = choose_page(self._pages())
+        except ChromeError as exc:
+            last = exc
+            chosen = None
+        fresh = str((chosen or {}).get("webSocketDebuggerUrl") or "")
+        if fresh and fresh not in sockets:
+            sockets.append(fresh)
+        for socket_url in sockets:
+            self._ws = socket_url
+            try:
+                return call(self._ws, method, params or {})
+            except CdpError as exc:
+                last = exc
+                self._ws = ""
+        if not recover_url:
+            raise ChromeError(str(last) if last else "the signed-out Chrome has no page")
+        self._open_replacement(recover_url)
+        try:
+            return call(self._ws, method, params or {})
+        except CdpError as exc:
+            raise ChromeError(str(exc)) from exc
+
+    def _open_replacement(self, url: str) -> None:
+        _require_url(url)
+        self._require_port()
+        try:
+            chosen = open_page(self.port or 0, url)
+        except CdpError as exc:
+            raise ChromeError(str(exc)) from exc
+        socket_url = str(chosen.get("webSocketDebuggerUrl") or "")
+        if not _local_ws(socket_url):
+            raise ChromeError("the signed-out Chrome has no page")
+        self._ws = socket_url
+        self._enter_fullscreen()
 
     def _require_pid(self) -> None:
         if not self.pid or not _is_our_process(self.pid, self.profile):

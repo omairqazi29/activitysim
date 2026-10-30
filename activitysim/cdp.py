@@ -37,8 +37,16 @@ def list_pages(port: int, timeout: float = 2) -> list[dict]:
 
 
 def open_page(port: int, url: str, timeout: float = 5) -> dict:
+    """Open one page. Chrome 156 rejects GET /json/new, so PUT is first."""
+
     quoted = urllib.parse.quote(url, safe=":/?&=%")
-    payload = _get_json(port, f"/json/new?{quoted}", timeout)
+    path = f"/json/new?{quoted}"
+    try:
+        payload = _get_json(port, path, timeout, method="PUT")
+    except CdpError as exc:
+        if "405" not in str(exc):
+            raise
+        payload = _get_json(port, path, timeout, method="GET")
     if not isinstance(payload, dict):
         raise CdpError("debugger did not return a page")
     return payload
@@ -99,22 +107,36 @@ def _check_port(port: int) -> None:
         raise CdpError("bad debugger port")
 
 
-def _get_json(port: int, path: str, timeout: float):
-    body = _get_text(port, path, timeout)
+def _get_json(port: int, path: str, timeout: float, method: str = "GET"):
+    body = _get_text(port, path, timeout, method)
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
         raise CdpError("debugger returned junk") from exc
 
 
-def _get_text(port: int, path: str, timeout: float) -> str:
+def _get_text(port: int, path: str, timeout: float, method: str = "GET") -> str:
     _check_port(port)
     if not path.startswith("/json/"):
         raise CdpError("refusing debugger path")
-    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="GET")
+    if method not in {"GET", "PUT"}:
+        raise CdpError("refusing debugger method")
+    data = b"" if method == "PUT" else None
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        method=method,
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode(errors="replace")[:180].strip()
+        finally:
+            exc.close()
+        raise CdpError(f"debugger returned {exc.code} {detail}".strip()) from exc
     except urllib.error.URLError as exc:
         raise CdpError("debugger is not up") from exc
 
@@ -142,31 +164,42 @@ def _connect(ws_url: str, timeout: float) -> _Link:
         path = f"{path}?{parts.query}"
     sock = socket.create_connection((host, port), timeout)
     sock.settimeout(timeout)
-    key = base64.b64encode(os.urandom(16)).decode()
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Origin: http://127.0.0.1:{port}\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n"
-    )
-    sock.sendall(request.encode())
-    link = _Link(sock)
-    header = _read_until(link, b"\r\n\r\n")
-    head = header[:-4]
-    if b" 101 " not in head.split(b"\r\n", 1)[0]:
-        raise CdpError("debugger refused the connection")
-    expected = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
-    accept = ""
-    for line in head.decode(errors="replace").split("\r\n"):
-        if line.lower().startswith("sec-websocket-accept:"):
-            accept = line.split(":", 1)[1].strip()
-    if accept != expected:
-        raise CdpError("debugger failed the handshake")
-    return link
+    owned = True
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Origin: http://127.0.0.1:{port}\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode())
+        link = _Link(sock)
+        header = _read_until(link, b"\r\n\r\n")
+        head = header[:-4]
+        status = head.split(b"\r\n", 1)[0]
+        if b" 101 " not in status:
+            body = bytes(link.pending[:180]).decode(errors="replace").strip()
+            detail = status.decode(errors="replace").strip()
+            if body:
+                detail = f"{detail}: {body}"
+            raise CdpError(f"debugger refused the connection: {detail}")
+        expected = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+        accept = ""
+        for line in head.decode(errors="replace").split("\r\n"):
+            if line.lower().startswith("sec-websocket-accept:"):
+                accept = line.split(":", 1)[1].strip()
+        if accept != expected:
+            raise CdpError("debugger failed the handshake")
+        owned = False
+        return link
+    finally:
+        if owned:
+            sock.close()
 
 
 def _read_until(link: _Link, marker: bytes) -> bytes:

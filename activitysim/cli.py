@@ -30,10 +30,11 @@ HELP = f"""\
 activitysim {__version__}
 Browse public pages and move the pointer on your Mac or Windows PC.
 
-This checks out a public GitHub repository and opens that folder in its own
-Visual Studio Code window. That window has a separate profile, not the Code
-you are signed into. It opens files, scrolls, and searches in them. It does
-not save. GitHub is next: repositories it has not already opened, and advanced
+This checks out a public GitHub repository and opens that folder in one
+fullscreen Visual Studio Code window. Later repositories reuse that window.
+It has a separate profile, not the Code you are signed into. It opens files,
+scrolls, and searches in them. It does not save. GitHub is next: repositories
+it has not already opened, and advanced
 search. About one chapter in ten is a public benchmark site such as DeepSWE,
 ProgramBench, SWE-bench, or Terminal-Bench. A site visit is short. A
 repository page also opens a source file when the file tree is on screen,

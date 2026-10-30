@@ -20,6 +20,7 @@ ES_DISPLAY_REQUIRED = 0x00000002
 AWAKE_FLAGS = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
 
 SW_RESTORE = 9
+SW_MAXIMIZE = 3
 WM_CLOSE = 0x0010
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
@@ -366,6 +367,16 @@ def window_bounds(pid: int) -> tuple[float, float, float, float] | None:
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return None
     return (float(rect.left), float(rect.top), float(rect.right), float(rect.bottom))
+
+
+def maximize(pid: int) -> None:
+    """Show the largest window maximized. This does not send keystrokes."""
+
+    user32 = _user32()
+    hwnd = _largest_window(pid)
+    if not hwnd:
+        raise OSError("the window is not on screen")
+    user32.ShowWindow(hwnd, SW_MAXIMIZE)
 
 
 def request_close(pid: int) -> None:

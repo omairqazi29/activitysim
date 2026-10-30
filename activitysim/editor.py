@@ -1,23 +1,26 @@
 """Check out a public repository and open it in a separate Visual Studio Code.
 
-The checkout lives under activitysim's own directory. The editor is a second
-instance with its own user-data directory, not the signed-in Code profile.
-Quick Open and Find type only paths and tokens that came from that checkout.
+The checkout lives under activitysim's own directory. The editor is one
+fullscreen window on activitysim's user-data directory, not the signed-in
+Code profile. Later repositories reuse that window. Quick Open and Find type
+only paths and tokens that came from that checkout.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Callable, Mapping
 
-from activitysim.chrome import pid_literal, script_activate, script_front_pid
+from activitysim.chrome import _command_has_profile, pid_literal, script_activate, script_front_pid
 from activitysim.input import can_type
 from activitysim.osa import OsaError, run_osascript
 
@@ -100,18 +103,31 @@ _SOURCE_SUFFIXES = frozenset({
     ".yaml",
 })
 
-# Written only inside activitysim's editor profile, before the first launch.
-_SETTINGS = """{
-  "workbench.startupEditor": "none",
-  "workbench.welcomePage.walkthroughs.openOnInstall": false,
-  "security.workspace.trust.enabled": false,
-  "security.workspace.trust.startupPrompt": "never",
-  "update.mode": "none",
-  "telemetry.telemetryLevel": "off",
-  "window.restoreWindows": "none",
-  "extensions.autoUpdate": false
+# Merged into activitysim's editor profile. Other keys in that file stay.
+_SETTING_OVERRIDES = {
+    "workbench.startupEditor": "none",
+    "workbench.welcomePage.walkthroughs.openOnInstall": False,
+    "security.workspace.trust.enabled": False,
+    "security.workspace.trust.startupPrompt": "never",
+    "update.mode": "none",
+    "telemetry.telemetryLevel": "off",
+    "window.restoreWindows": "none",
+    "window.restoreFullscreen": True,
+    "window.nativeFullScreen": True,
+    "extensions.autoUpdate": False,
 }
-"""
+
+# Fixed script. The profile path is filtered in Python, never interpolated here.
+_CODE_LIST_SCRIPT = (
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    "Get-CimInstance -ClassName Win32_Process -Filter \"Name = 'Code.exe'\" "
+    "| ForEach-Object { "
+    "$cmd = $_.CommandLine; "
+    "if ($null -eq $cmd) { $cmd = '' }; "
+    "$cmd = $cmd -replace '[\\r\\n\\t\\v\\f\\u001c\\u001d\\u001e\\u0085\\u2028\\u2029]', ' '; "
+    "Write-Output ($_.ProcessId.ToString() + [char]9 + $cmd) "
+    "}"
+)
 
 
 def repo_ok(name: str) -> bool:
@@ -237,7 +253,7 @@ def find_code(
 
 
 def launch_code_command(binary: Path, folder: Path, profile: Path, real: Path | None = None) -> list[str]:
-    """Argv for one new window on `folder`, using activitysim's profile only."""
+    """Argv that reuses activitysim's one Code window. The signed-in profile is not named."""
 
     chosen = assert_editor_profile(profile, real)
     target = folder.expanduser().resolve()
@@ -247,7 +263,7 @@ def launch_code_command(binary: Path, folder: Path, profile: Path, real: Path | 
         raise ValueError("refusing to open the editor profile as a folder")
     return [
         str(binary),
-        "--new-window",
+        "--reuse-window",
         "--disable-workspace-trust",
         f"--user-data-dir={chosen}",
         str(target),
@@ -255,15 +271,145 @@ def launch_code_command(binary: Path, folder: Path, profile: Path, real: Path | 
 
 
 def prepare_profile(profile: Path, real: Path | None = None) -> Path:
-    """Create activitysim's editor profile and a quiet settings file, nowhere else."""
+    """Create activitysim's editor profile and keep one quiet fullscreen window."""
 
     root = assert_editor_profile(profile, real)
     user = root / "User"
     user.mkdir(parents=True, exist_ok=True)
     settings = user / "settings.json"
-    if not settings.exists():
-        settings.write_text(_SETTINGS, encoding="utf-8")
+    current: dict = {}
+    if settings.exists():
+        try:
+            loaded = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return root
+        if not isinstance(loaded, dict):
+            return root
+        current = loaded
+    changed = not settings.is_file()
+    for key, value in _SETTING_OVERRIDES.items():
+        if current.get(key) != value:
+            current[key] = value
+            changed = True
+    if changed:
+        settings.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
     return root
+
+
+def matches_editor_command(command: str, profile: Path) -> bool:
+    """True for activitysim's Code process, not a helper and not the signed-in app."""
+
+    if "--type=" in command:
+        return False
+    if not _command_has_profile(command, profile):
+        return False
+    from activitysim.winchrome import basename, executable_token
+
+    name = basename(executable_token(command)).lower()
+    if name in {"code", "code.exe"}:
+        return True
+    lowered = command.lower()
+    if "google chrome" in lowered or "chrome.exe" in lowered:
+        return False
+    return "visual studio code.app/contents/macos/code" in lowered
+
+
+def editor_pids_from_ps(text: str, profile: Path) -> list[int]:
+    """Parse `ps` lines of `pid command`. Helpers and other profiles are skipped."""
+
+    found: list[int] = []
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        pid_text, _, command = raw.partition(" ")
+        if not pid_text.isdigit():
+            continue
+        if matches_editor_command(command.strip(), profile):
+            found.append(int(pid_text))
+    return found
+
+
+def editor_pids_from_rows(text: str, profile: Path) -> list[int]:
+    """Parse Windows `pid<TAB>command` rows for Code.exe on this profile."""
+
+    from activitysim.winchrome import iter_process_rows
+
+    return [pid for pid, command in iter_process_rows(text) if matches_editor_command(command, profile)]
+
+
+def code_process_argv() -> list[str]:
+    """Argv for the Code.exe listing. It does not contain a profile path."""
+
+    from activitysim.winchrome import powershell_path
+
+    return [
+        str(powershell_path()),
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        _CODE_LIST_SCRIPT,
+    ]
+
+
+def editor_pids(profile: Path) -> list[int]:
+    """Main activitysim Code processes. The signed-in Code is not included."""
+
+    chosen = assert_editor_profile(profile)
+    if sys.platform == "win32":
+        from activitysim.winchrome import decode_process_output
+
+        exe_list = code_process_argv()
+        exe = Path(exe_list[0])
+        if not exe.is_file():
+            return []
+        kwargs: dict = {"capture_output": True, "check": False, "timeout": 5}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+        try:
+            result = subprocess.run(exe_list, **kwargs)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if result.returncode != 0:
+            return []
+        return editor_pids_from_rows(decode_process_output(result.stdout or b""), chosen)
+    result = subprocess.run(
+        ["ps", "-axww", "-o", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return editor_pids_from_ps(result.stdout, chosen)
+
+
+def stop_editor(profile: Path) -> None:
+    """Close activitysim's Code windows. The signed-in Code is not signaled."""
+
+    chosen = assert_editor_profile(profile)
+    windows = sys.platform == "win32"
+    if windows:
+        from activitysim.winchrome import clear_process_cache, request_close
+
+        clear_process_cache()
+    for pid in editor_pids(chosen):
+        try:
+            if windows:
+                request_close(pid)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+    deadline = time.time() + 3
+    while time.time() < deadline and editor_pids(chosen):
+        time.sleep(0.1)
+    if not windows:
+        return
+    for pid in editor_pids(chosen):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
 
 
 def checkout_path(root: Path, repo: str) -> Path:
@@ -415,6 +561,55 @@ def parse_origin_size(text: str) -> tuple[float, float, float, float] | None:
     return (x, y, x + width, y + height)
 
 
+def script_editor_fullscreen(pid: int) -> str:
+    """Enter full screen for this pid. A window that is already full screen is left there.
+
+    The menu click is the same one Chrome uses. Visual Studio Code also nests
+    the command under View > Appearance. AppleScript does not send keystrokes.
+    """
+
+    number = pid_literal(pid)
+    return f"""
+tell application "System Events"
+  tell (first process whose unix id is {number})
+    set frontmost to true
+    set best to missing value
+    set bestArea to 0
+    repeat with w in windows
+      try
+        set s to size of w
+        set wide to item 1 of s
+        set high to item 2 of s
+        set area to wide * high
+        if high > 200 and area > bestArea then
+          set bestArea to area
+          set best to w
+        end if
+      end try
+    end repeat
+    if best is missing value then return
+    try
+      if (value of attribute "AXFullScreen" of best) is true then return
+    end try
+    set entered to false
+    try
+      click menu item "Enter Full Screen" of menu "View" of menu bar 1
+      set entered to true
+    end try
+    if entered then return
+    try
+      click menu item "Full Screen" of menu 1 of menu item "Appearance" of menu "View" of menu bar 1
+      set entered to true
+    end try
+    if entered then return
+    try
+      set value of attribute "AXFullScreen" of best to true
+    end try
+  end tell
+end tell
+"""
+
+
 def script_largest_window(pid: int) -> str:
     """Bounds of the largest window for this pid, not a small palette."""
 
@@ -523,8 +718,13 @@ class CodeEditor:
         if binary is None:
             raise OsaError("Visual Studio Code is not installed")
         profile = prepare_profile(editor_profile_path())
+        running = self.pid is not None and self.pid in editor_pids(profile)
+        if not running:
+            # A previous run can leave several windows. Close those, then open one.
+            stop_editor(profile)
+            self._process = None
+            self.pid = None
         command = launch_code_command(binary, Path(folder), profile)
-        previous = self._process if self._process is not None and self._process.poll() is None else None
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -532,18 +732,48 @@ class CodeEditor:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        if previous is None:
-            self._process = process
-            self.pid = process.pid
-            time.sleep(1.0)
-        else:
-            # A second launch on the same profile usually hands the folder to the
-            # running instance and exits. Keep the pid that is still alive.
-            time.sleep(0.4)
-            if previous.poll() is not None and process.poll() is None:
+        self._adopt(profile, process)
+        time.sleep(0.4 if running else 1.0)
+        self.folder = str(folder)
+        self.enter_fullscreen()
+
+    def _adopt(self, profile: Path, process: subprocess.Popen[str]) -> None:
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            found = editor_pids(profile)
+            if process.pid in found:
                 self._process = process
                 self.pid = process.pid
-        self.folder = str(folder)
+                return
+            if found:
+                self.pid = found[-1]
+                if self._process is None or self._process.poll() is not None:
+                    self._process = process
+                return
+            if process.poll() is not None:
+                break
+            time.sleep(0.1)
+        if self.pid is None:
+            self._process = process
+            self.pid = process.pid
+
+    def enter_fullscreen(self) -> None:
+        """Make activitysim's Code window full screen. A second call does not leave it."""
+
+        if not self.pid:
+            return
+        if sys.platform == "win32":
+            from activitysim.winchrome import maximize
+
+            try:
+                maximize(self.pid)
+            except OSError:
+                return
+            return
+        try:
+            run_osascript(script_editor_fullscreen(self.pid), timeout=8)
+        except OsaError:
+            return
 
     def activate(self) -> None:
         if not self.pid:

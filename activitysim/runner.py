@@ -1,7 +1,8 @@
 """Drive the editor and the signed-out Chrome with real pointer and keyboard events.
 
-A session checks out a public repository and opens it in Visual Studio Code
-first. Later chapters are mostly that editor, then GitHub, and about one
+A session checks out a public repository and opens it in one fullscreen
+Visual Studio Code window first. Later folders reuse that window. Later
+chapters are mostly that editor, then GitHub, and about one
 chapter in ten is a benchmark site. AppleScript and the debugger only open
 windows and read pages. The clicks and keystrokes are real input. A normal
 run prints one line when the first window opens. Errors are printed on their own.
@@ -15,6 +16,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from activitysim.cdp import CdpError
 from activitysim.editor import find_token
 from activitysim.geom import (
     away_from_hot_corners,
@@ -196,7 +198,7 @@ class Runner:
                 continue
             try:
                 self._step()
-            except (OsaError, OSError, ValueError) as exc:
+            except (OsaError, OSError, ValueError, CdpError) as exc:
                 self.log(f"step failed: {exc}", error=True)
             self._note_front()
             self._remember()
