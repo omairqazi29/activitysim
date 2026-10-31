@@ -182,6 +182,7 @@ class FakeEditor:
         self.pointer = None
         self.opened: list[str] = []
         self.activated = 0
+        self.closed_chat = 0
         self.bounds_value = (40.0, 40.0, 1500.0, 980.0)
         self._front = True
 
@@ -199,6 +200,10 @@ class FakeEditor:
         self.activated += 1
         if self.pointer is not None and self._front:
             self.pointer.front = "Code"
+
+    def close_chat_panel(self) -> bool:
+        self.closed_chat += 1
+        return False
 
     def is_front(self) -> bool:
         if not self._front:

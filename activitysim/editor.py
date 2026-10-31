@@ -3,7 +3,8 @@
 The checkout lives under activitysim's own directory. The editor is one
 fullscreen window on activitysim's user-data directory, not the signed-in
 Code profile. Later repositories reuse that window. Quick Open and Find type
-only paths and tokens that came from that checkout.
+only paths and tokens that came from that checkout. Chat and Claude Code are
+closed first, so those keystrokes do not land in that side bar.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import random
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -125,7 +127,24 @@ _SETTING_OVERRIDES = {
     "files.readonlyInclude": {"*": True, "**/*": True},
     "files.hotExit": "off",
     "extensions.autoUpdate": False,
+    # Chat and Claude Code sit in the secondary side bar and take Quick Open.
+    "workbench.secondarySideBar.defaultVisibility": "hidden",
+    "chat.disableAIFeatures": True,
 }
+
+# Installed for the signed-in editor, and otherwise loaded in this window too.
+# The flag is for this process only. The signed-in Code is not launched.
+_CLAUDE_EXTENSION = "anthropic.claude-code"
+
+# Saved workspace layout. These rows already exist after a folder has been open.
+_CHAT_HIDDEN_KEYS = (
+    "workbench.auxiliaryBar.hidden",
+    "workbench.panel.hidden",
+)
+_CHAT_VIEW_KEYS = (
+    "workbench.auxiliarybar.viewContainersWorkspaceState",
+    "workbench.panel.viewContainersWorkspaceState",
+)
 
 # Fixed script. The profile path is filtered in Python, never interpolated here.
 _CODE_LIST_SCRIPT = (
@@ -263,7 +282,11 @@ def find_code(
 
 
 def launch_code_command(binary: Path, folder: Path, profile: Path, real: Path | None = None) -> list[str]:
-    """Argv that reuses activitysim's one Code window. The signed-in profile is not named."""
+    """Argv that reuses activitysim's one Code window. The signed-in profile is not named.
+
+    Claude Code is disabled for this process. The flag applies when the
+    command opens a window, so a leftover activitysim Code is stopped first.
+    """
 
     chosen = assert_editor_profile(profile, real)
     target = folder.expanduser().resolve()
@@ -275,6 +298,8 @@ def launch_code_command(binary: Path, folder: Path, profile: Path, real: Path | 
         str(binary),
         "--reuse-window",
         "--disable-workspace-trust",
+        "--disable-extension",
+        _CLAUDE_EXTENSION,
         f"--user-data-dir={chosen}",
         str(target),
     ]
@@ -573,6 +598,108 @@ def find_token(relative: str) -> str:
     return token
 
 
+def _views_without_chat(raw: object) -> str | None:
+    """JSON view list with Chat and Claude Code marked not visible.
+
+    Other views are unchanged. A value that is not that list is left alone.
+    """
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        return None
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(items, list):
+        return None
+    changed = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ident = item.get("id")
+        if not isinstance(ident, str):
+            continue
+        lowered = ident.lower()
+        if "chat" not in lowered and "claude" not in lowered:
+            continue
+        if item.get("visible") is not False:
+            item["visible"] = False
+            changed = True
+    if not changed:
+        return None
+    return json.dumps(items)
+
+
+def _hide_chat_db(db: Path) -> None:
+    """One workspace database. A locked file is skipped by the caller."""
+
+    connection = sqlite3.connect(str(db), timeout=0.2)
+    try:
+        found = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ItemTable'"
+        ).fetchone()
+        if found is None:
+            return
+        for key in _CHAT_HIDDEN_KEYS:
+            connection.execute(
+                "UPDATE ItemTable SET value = ? WHERE key = ?",
+                ("true", key),
+            )
+        for key in _CHAT_VIEW_KEYS:
+            row = connection.execute(
+                "SELECT value FROM ItemTable WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                continue
+            updated = _views_without_chat(row[0])
+            if updated is None:
+                continue
+            connection.execute(
+                "UPDATE ItemTable SET value = ? WHERE key = ?",
+                (updated, key),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def hide_chat_layouts(profile: Path, real: Path | None = None) -> None:
+    """Saved layouts in activitysim's editor profile start with Chat closed.
+
+    The signed-in Code profile is refused. A workspace directory that resolves
+    outside this profile is not opened. Code may still have the current
+    database locked; that one is skipped and the menu hides it after launch.
+    """
+
+    root = assert_editor_profile(profile, real)
+    storage = root / "User" / "workspaceStorage"
+    if not storage.is_dir():
+        return
+    try:
+        base = storage.resolve()
+    except OSError:
+        return
+    for child in storage.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            chosen = child.resolve()
+        except OSError:
+            continue
+        if chosen != base and base not in chosen.parents:
+            continue
+        db = chosen / "state.vscdb"
+        if not db.is_file() or db.is_symlink():
+            continue
+        try:
+            _hide_chat_db(db)
+        except (OSError, sqlite3.Error):
+            continue
+
+
 def parse_origin_size(text: str) -> tuple[float, float, float, float] | None:
     """AppleScript `x y width height` into a left, top, right, bottom frame."""
 
@@ -659,6 +786,50 @@ try
 end try
 if entered then return "entered"
 return "absent"
+""",
+    )
+
+
+def script_close_chat(pid: int) -> str:
+    """Hide the secondary side bar and the bottom panel when they are open.
+
+    Chat and Claude Code live there. Both menu items toggle, so a click
+    happens only while the menu mark says the part is showing. The primary
+    side bar is not a target. AppleScript does not send keystrokes.
+    """
+
+    return script_tell_pid(
+        pid,
+        """
+set frontmost to true
+delay 0.2
+set closed to false
+try
+  set mi to menu item "Secondary Side Bar" of menu 1 of menu item "Appearance" of menu "View" of menu bar 1
+  set mark to ""
+  try
+    set rawMark to value of attribute "AXMenuItemMarkChar" of mi
+    if rawMark is not missing value then set mark to rawMark as text
+  end try
+  if mark is not "" then
+    click mi
+    set closed to true
+  end if
+end try
+try
+  set mi to menu item "Panel" of menu 1 of menu item "Appearance" of menu "View" of menu bar 1
+  set mark to ""
+  try
+    set rawMark to value of attribute "AXMenuItemMarkChar" of mi
+    if rawMark is not missing value then set mark to rawMark as text
+  end try
+  if mark is not "" then
+    click mi
+    set closed to true
+  end if
+end try
+if closed then return "closed"
+return "clear"
 """,
     )
 
@@ -853,6 +1024,9 @@ class CodeEditor:
             self._process = None
             self.pid = None
         profile = prepare_profile(profile_path)
+        # A restored checkout shows Chat in the secondary side bar. Hide that
+        # in the saved layout before this folder is loaded.
+        hide_chat_layouts(profile)
         command = launch_code_command(binary, Path(folder), profile)
         process = subprocess.Popen(
             command,
@@ -870,6 +1044,7 @@ class CodeEditor:
         self.enter_fullscreen(settle=True)
         if self.dismiss_save_prompt():
             self.enter_fullscreen()
+        self.close_chat_panel()
 
     def _adopt(self, profile: Path, process: subprocess.Popen[str]) -> None:
         deadline = time.time() + 8
@@ -890,6 +1065,25 @@ class CodeEditor:
         if self.pid is None:
             self._process = process
             self.pid = process.pid
+
+    def close_chat_panel(self) -> bool:
+        """Hide Chat and Claude Code when their part is open.
+
+        A part that is already hidden is not clicked. On Windows the saved
+        layout and the disabled extension do this, because the menu mark is
+        a macOS check. Full screen is restored if a click leaves it.
+        """
+
+        if not self.pid or sys.platform == "win32":
+            return False
+        try:
+            state = run_osascript(script_close_chat(self.pid), timeout=8).strip()
+        except (OsaError, ValueError):
+            return False
+        if state != "closed":
+            return False
+        self.enter_fullscreen()
+        return True
 
     def dismiss_save_prompt(self) -> bool:
         """Click Don't Save when Code asks. Save is not clicked."""
