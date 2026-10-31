@@ -20,7 +20,13 @@ import time
 from pathlib import Path
 from typing import Callable, Mapping
 
-from activitysim.chrome import _command_has_profile, pid_literal, script_activate, script_front_pid
+from activitysim.chrome import (
+    _command_has_profile,
+    pid_literal,
+    script_activate,
+    script_front_pid,
+    script_tell_pid,
+)
 from activitysim.input import can_type
 from activitysim.osa import OsaError, run_osascript
 
@@ -114,6 +120,10 @@ _SETTING_OVERRIDES = {
     "window.restoreWindows": "none",
     "window.restoreFullscreen": True,
     "window.nativeFullScreen": True,
+    "window.confirmBeforeClose": "never",
+    # A typed path must not land in the buffer when Quick Open is not focused.
+    "files.readonlyInclude": {"*": True, "**/*": True},
+    "files.hotExit": "off",
     "extensions.autoUpdate": False,
 }
 
@@ -384,7 +394,11 @@ def editor_pids(profile: Path) -> list[int]:
 
 
 def stop_editor(profile: Path) -> None:
-    """Close activitysim's Code windows. The signed-in Code is not signaled."""
+    """Close activitysim's Code windows. The signed-in Code is not signaled.
+
+    A save prompt keeps the process alive across SIGTERM. Don't Save is
+    clicked first. A prompt that is still up is killed with the process.
+    """
 
     chosen = assert_editor_profile(profile)
     windows = sys.platform == "win32"
@@ -392,6 +406,9 @@ def stop_editor(profile: Path) -> None:
         from activitysim.winchrome import clear_process_cache, request_close
 
         clear_process_cache()
+    else:
+        for pid in editor_pids(chosen):
+            _dismiss_editor_save(pid)
     for pid in editor_pids(chosen):
         try:
             if windows:
@@ -403,11 +420,21 @@ def stop_editor(profile: Path) -> None:
     deadline = time.time() + 3
     while time.time() < deadline and editor_pids(chosen):
         time.sleep(0.1)
-    if not windows:
+    if windows:
+        for pid in editor_pids(chosen):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
         return
     for pid in editor_pids(chosen):
+        _dismiss_editor_save(pid)
+    deadline = time.time() + 1
+    while time.time() < deadline and editor_pids(chosen):
+        time.sleep(0.1)
+    for pid in editor_pids(chosen):
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(pid, signal.SIGKILL)
         except OSError:
             continue
 
@@ -564,76 +591,176 @@ def parse_origin_size(text: str) -> tuple[float, float, float, float] | None:
 def script_editor_fullscreen(pid: int) -> str:
     """Enter full screen for this pid. A window that is already full screen is left there.
 
-    The menu click is the same one Chrome uses. Visual Studio Code also nests
-    the command under View > Appearance. AppleScript does not send keystrokes.
+    Visual Studio Code has no "Enter Full Screen" item. View > Appearance >
+    Full Screen is a toggle, so it is clicked only when AXFullScreen is false.
+    AppleScript does not send keystrokes.
+    """
+
+    return script_tell_pid(
+        pid,
+        """
+set frontmost to true
+delay 0.4
+set bestIndex to 0
+set bestArea to 0
+set isFull to false
+set readable to false
+set nth to 0
+repeat with w in windows
+  set nth to nth + 1
+  try
+    set s to size of w
+    set wide to item 1 of s
+    set high to item 2 of s
+    if high > 200 then
+      set area to wide * high
+      if area > bestArea then
+        set bestArea to area
+        set bestIndex to nth
+      end if
+      try
+        if (value of attribute "AXFullScreen" of w) is true then
+          set isFull to true
+        else
+          set readable to true
+        end if
+      end try
+    end if
+  end try
+end repeat
+if isFull then return "fullscreen"
+if bestIndex is 0 then return "absent"
+if readable is false then return "absent"
+set best to window bestIndex
+try
+  set value of attribute "AXFullScreen" of best to true
+end try
+try
+  if (value of attribute "AXFullScreen" of best) is true then return "fullscreen"
+end try
+set entered to false
+repeat with mi in menu items of menu "View" of menu bar 1
+  try
+    set itemName to name of mi as text
+  on error
+    set itemName to ""
+  end try
+  if itemName is "Exit Full Screen" then return "fullscreen"
+  if itemName is "Enter Full Screen" then
+    click mi
+    set entered to true
+    exit repeat
+  end if
+end repeat
+if entered then return "entered"
+try
+  click menu item "Full Screen" of menu 1 of menu item "Appearance" of menu "View" of menu bar 1
+  set entered to true
+end try
+if entered then return "entered"
+return "absent"
+""",
+    )
+
+
+def script_dismiss_save(pid: int) -> str:
+    """Click Don't Save on this pid. Save and Save Anyway are not clicked.
+
+    The button name uses a straight apostrophe. macOS may show a curly one.
     """
 
     number = pid_literal(pid)
-    return f"""
-tell application "System Events"
-  tell (first process whose unix id is {number})
+    curly = "Don\u2019t Save"
+    return f"""tell application "System Events"
+  set targetProc to missing value
+  repeat with proc in processes
+    try
+      if (unix id of proc) is equal to {number} then
+        set targetProc to proc
+        exit repeat
+      end if
+    end try
+  end repeat
+  if targetProc is missing value then error "activitysim process is not open"
+  tell targetProc
     set frontmost to true
-    set best to missing value
-    set bestArea to 0
+    delay 0.4
     repeat with w in windows
+      set hit to false
+      tell me to set hit to clickDontSave(w)
+      if hit then return "dismissed"
       try
-        set s to size of w
-        set wide to item 1 of s
-        set high to item 2 of s
-        set area to wide * high
-        if high > 200 and area > bestArea then
-          set bestArea to area
-          set best to w
-        end if
+        repeat with sh in sheets of w
+          tell me to set hit to clickDontSave(sh)
+          if hit then return "dismissed"
+          try
+            repeat with g in groups of sh
+              tell me to set hit to clickDontSave(g)
+              if hit then return "dismissed"
+            end repeat
+          end try
+        end repeat
       end try
     end repeat
-    if best is missing value then return
-    try
-      if (value of attribute "AXFullScreen" of best) is true then return
-    end try
-    set entered to false
-    try
-      click menu item "Enter Full Screen" of menu "View" of menu bar 1
-      set entered to true
-    end try
-    if entered then return
-    try
-      click menu item "Full Screen" of menu 1 of menu item "Appearance" of menu "View" of menu bar 1
-      set entered to true
-    end try
-    if entered then return
-    try
-      set value of attribute "AXFullScreen" of best to true
-    end try
   end tell
 end tell
+return "clear"
+
+on clickDontSave(el)
+  tell application "System Events"
+    try
+      repeat with b in buttons of el
+        try
+          set label to name of b as text
+        on error
+          set label to ""
+        end try
+        if label starts with "Don't Save" or label starts with "{curly}" then
+          click b
+          return true
+        end if
+      end repeat
+    end try
+  end tell
+  return false
+end clickDontSave
 """
+
+
+def _dismiss_editor_save(pid: int) -> bool:
+    """True when Don't Save was clicked. A missing window is not an error."""
+
+    if sys.platform == "win32":
+        return False
+    try:
+        state = run_osascript(script_dismiss_save(pid), timeout=8).strip()
+    except (OsaError, ValueError):
+        return False
+    return state == "dismissed"
 
 
 def script_largest_window(pid: int) -> str:
     """Bounds of the largest window for this pid, not a small palette."""
 
-    number = pid_literal(pid)
-    return f"""
-tell application "System Events"
-  tell (first process whose unix id is {number})
-    set best to ""
-    set bestArea to 0
-    repeat with w in windows
-      try
-        set s to size of w
-        set area to (item 1 of s) * (item 2 of s)
-        if area > bestArea then
-          set bestArea to area
-          set p to position of w
-          set best to (item 1 of p as text) & " " & (item 2 of p as text) & " " & (item 1 of s as text) & " " & (item 2 of s as text)
-        end if
-      end try
-    end repeat
-    return best
-  end tell
-end tell
-"""
+    return script_tell_pid(
+        pid,
+        """
+set best to ""
+set bestArea to 0
+repeat with w in windows
+  try
+    set s to size of w
+    set area to (item 1 of s) * (item 2 of s)
+    if area > bestArea then
+      set bestArea to area
+      set p to position of w
+      set best to (item 1 of p as text) & " " & (item 2 of p as text) & " " & (item 1 of s as text) & " " & (item 2 of s as text)
+    end if
+  end try
+end repeat
+return best
+""",
+    )
 
 
 class CodeDeck:
@@ -717,13 +844,15 @@ class CodeEditor:
         binary = find_code()
         if binary is None:
             raise OsaError("Visual Studio Code is not installed")
-        profile = prepare_profile(editor_profile_path())
-        running = self.pid is not None and self.pid in editor_pids(profile)
+        profile_path = editor_profile_path()
+        running = self.pid is not None and self.pid in editor_pids(profile_path)
         if not running:
             # A previous run can leave several windows. Close those, then open one.
-            stop_editor(profile)
+            # Settings are written after that exit so Code does not overwrite them.
+            stop_editor(profile_path)
             self._process = None
             self.pid = None
+        profile = prepare_profile(profile_path)
         command = launch_code_command(binary, Path(folder), profile)
         process = subprocess.Popen(
             command,
@@ -735,7 +864,12 @@ class CodeEditor:
         self._adopt(profile, process)
         time.sleep(0.4 if running else 1.0)
         self.folder = str(folder)
-        self.enter_fullscreen()
+        # Reusing the window with a dirty file raises Save / Don't Save and
+        # drops full screen. Discard the edit, then enter full screen.
+        self.dismiss_save_prompt()
+        self.enter_fullscreen(settle=True)
+        if self.dismiss_save_prompt():
+            self.enter_fullscreen()
 
     def _adopt(self, profile: Path, process: subprocess.Popen[str]) -> None:
         deadline = time.time() + 8
@@ -757,8 +891,19 @@ class CodeEditor:
             self._process = process
             self.pid = process.pid
 
-    def enter_fullscreen(self) -> None:
-        """Make activitysim's Code window full screen. A second call does not leave it."""
+    def dismiss_save_prompt(self) -> bool:
+        """Click Don't Save when Code asks. Save is not clicked."""
+
+        if not self.pid:
+            return False
+        return _dismiss_editor_save(self.pid)
+
+    def enter_fullscreen(self, settle: bool = False) -> None:
+        """Make activitysim's Code window full screen. A second call does not leave it.
+
+        `settle` waits through the startup moment when Code leaves full screen
+        again. Later calls only enter when the window is not already there.
+        """
 
         if not self.pid:
             return
@@ -770,10 +915,22 @@ class CodeEditor:
             except OSError:
                 return
             return
-        try:
-            run_osascript(script_editor_fullscreen(self.pid), timeout=8)
-        except OsaError:
-            return
+        attempts = 4 if settle else 1
+        stable = 0
+        for _ in range(attempts):
+            try:
+                state = run_osascript(script_editor_fullscreen(self.pid), timeout=8).strip()
+            except OsaError:
+                return
+            if state == "fullscreen":
+                stable += 1
+                if not settle or stable >= 2:
+                    return
+                time.sleep(0.4)
+                continue
+            stable = 0
+            if settle:
+                time.sleep(0.35)
 
     def activate(self) -> None:
         if not self.pid:

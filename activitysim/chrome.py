@@ -210,43 +210,66 @@ def pid_literal(pid: int) -> str:
     return str(pid)
 
 
-def script_activate(pid: int) -> str:
+def script_tell_pid(pid: int, body: str) -> str:
+    """Tell one process, chosen by comparing unix ids.
+
+    `whose unix id` returns the first process of that name. With Visual
+    Studio Code already open, that is the signed-in Code, and a menu click
+    there leaves full screen. The same filter is wrong for `frontmost`.
+    """
+
     number = pid_literal(pid)
-    return f"""
-tell application "System Events"
-  set frontmost of (first process whose unix id is {number}) to true
+    lines = []
+    for line in body.strip("\n").splitlines():
+        stripped = line.strip()
+        lines.append(f"    {stripped}" if stripped else "")
+    inner = "\n".join(lines)
+    return f"""tell application "System Events"
+  set targetProc to missing value
+  repeat with proc in processes
+    try
+      if (unix id of proc) is equal to {number} then
+        set targetProc to proc
+        exit repeat
+      end if
+    end try
+  end repeat
+  if targetProc is missing value then error "activitysim process is not open"
+  tell targetProc
+{inner}
+  end tell
 end tell
 """
+
+
+def script_activate(pid: int) -> str:
+    return script_tell_pid(pid, "set frontmost to true")
 
 
 def script_bounds(pid: int) -> str:
-    number = pid_literal(pid)
-    return f"""
-tell application "System Events"
-  tell (first process whose unix id is {number})
-    set p to position of window 1
-    set s to size of window 1
-  end tell
-end tell
+    return script_tell_pid(
+        pid,
+        """
+set p to position of window 1
+set s to size of window 1
 return (item 1 of p as text) & " " & (item 2 of p as text) & " " & (item 1 of s as text) & " " & (item 2 of s as text)
-"""
+""",
+    )
 
 
 def script_fullscreen(pid: int) -> str:
-    number = pid_literal(pid)
-    return f"""
-tell application "System Events"
-  tell (first process whose unix id is {number})
-    set frontmost to true
-    repeat with mi in menu items of menu "View" of menu bar 1
-      if name of mi is "Enter Full Screen" then
-        click mi
-        exit repeat
-      end if
-    end repeat
-  end tell
-end tell
-"""
+    return script_tell_pid(
+        pid,
+        """
+set frontmost to true
+repeat with mi in menu items of menu "View" of menu bar 1
+  if name of mi is "Enter Full Screen" then
+    click mi
+    exit repeat
+  end if
+end repeat
+""",
+    )
 
 
 def choose_page(pages: list[dict]) -> dict | None:
@@ -270,9 +293,22 @@ def choose_page(pages: list[dict]) -> dict | None:
 
 
 def script_front_pid() -> str:
+    """Unix id of the front process.
+
+    `whose frontmost` returns the first Code when two are running, which is
+    the signed-in one even while activitysim's Code is in front.
+    """
+
     return """
 tell application "System Events"
-  return unix id of first application process whose frontmost is true
+  repeat with proc in processes
+    try
+      if frontmost of proc is true then
+        return unix id of proc
+      end if
+    end try
+  end repeat
+  return ""
 end tell
 """
 

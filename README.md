@@ -58,7 +58,8 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
   window. Later repositories reuse that window instead of opening another.
   The window uses activitysim's profile, not the Code you are
   signed into. It opens source files with Quick Open, scrolls, moves through
-  the text, and sometimes searches in the file. It does not save. If that
+  the text, and sometimes searches in the file. It does not save. If Code
+  asks to save, it chooses Don't Save. If that
   window opens, the program prints `launching dev browser` and then stays
   quiet. Your Chrome and your own Code stay as they were.
 - Later chapters keep that mix: about six in ten are the editor, about three
@@ -85,8 +86,8 @@ the simulator backs off instead of clicking it.
 - It will not open your signed-in Visual Studio Code profile, and it will not
   open a folder outside its own checkout.
 - It will not read that Chrome's cookies, passwords, or the login keychain.
-- It will not save files in the editor, and it will not type there unless
-  that window is in front.
+- It will not save files in the editor. A save prompt is answered Don't Save.
+  It will not type there unless that window is in front.
 - It will not open X or Twitter. Those hosts do not resolve in the signed-out Chrome.
 - It will not click the right side of a result row, where Star, Fork, and Watch sit.
 - In Chrome it types only into the GitHub search box or the address bar, and only while its own Chrome is in front. In the editor it types a source path into Quick Open, or a short find token, and only while that window is in front.
