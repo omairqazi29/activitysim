@@ -393,6 +393,12 @@ class Runner:
             self.log("skipped keys, the editor is not in front")
             return
         self.pointer.type_text(relative)
+        # Return is the save sheet's default button. Don't Save first.
+        if self._clear_save_prompt():
+            self._sleep(0.15)
+        if not self._editor_is_front():
+            self.log("skipped keys, the editor is not in front")
+            return
         self.pointer.hotkey("return", ())
         self.actions.append("edit")
         self.log(f"open {relative}")
@@ -439,6 +445,10 @@ class Runner:
         token = find_token(relative)
         if not token or not self._editor_is_front():
             return
+        if self._clear_save_prompt():
+            self._sleep(0.15)
+        if not self._editor_is_front():
+            return
         self.pointer.hotkey("f", ("command",))
         self._sleep(0.08)
         if not self._editor_is_front():
@@ -467,9 +477,37 @@ class Runner:
             self.editor.activate()
         except (OSError, OsaError, ValueError):
             return False
+        self._clear_save_prompt()
         if not self._editor_is_front():
             return False
         self._mark_driving()
+        return True
+
+    def _clear_save_prompt(self) -> bool:
+        """Don't Save, then restore full screen if that sheet left it.
+
+        Opened files are read-only, so this is the leftover from an older
+        session. Save is never clicked: Return would confirm it.
+        """
+
+        editor = self.editor
+        if editor is None:
+            return False
+        dismiss = getattr(editor, "dismiss_save_prompt", None)
+        if not callable(dismiss):
+            return False
+        try:
+            dismissed = bool(dismiss())
+        except (OSError, OsaError, ValueError):
+            return False
+        if not dismissed:
+            return False
+        enter = getattr(editor, "enter_fullscreen", None)
+        if callable(enter):
+            try:
+                enter()
+            except (OSError, OsaError, ValueError, TypeError):
+                return True
         return True
 
     def _editor_is_front(self) -> bool:

@@ -64,6 +64,7 @@ from activitysim.editor import (
     real_editor_profile,
     repo_ok,
     assert_editor_profile,
+    script_dismiss_save,
     script_editor_fullscreen,
     script_largest_window,
 )
@@ -509,7 +510,10 @@ class LockedChromeTests(unittest.TestCase):
             script_fullscreen(42),
             script_front_pid(),
         ]
-        self.assertIn("unix id is 42", scripts[0])
+        self.assertIn("equal to 42", scripts[0])
+        self.assertNotIn("whose unix id", scripts[0])
+        self.assertNotIn("whose frontmost", scripts[3])
+        self.assertIn("frontmost of proc is true", scripts[3])
         self.assertIn("Enter Full Screen", scripts[2])
         for script in scripts:
             self.assertNotIn("keystroke", script)
@@ -2486,24 +2490,33 @@ class EditorTests(unittest.TestCase):
                 launch_code_command(Path("Code"), other, other, real)
         script = script_largest_window(42)
         full = script_editor_fullscreen(42)
-        self.assertIn("unix id is 42", script)
+        dismiss = script_dismiss_save(42)
+        self.assertIn("equal to 42", script)
+        self.assertIn("equal to 42", full)
+        self.assertIn("equal to 42", dismiss)
+        self.assertNotIn("whose unix id", full)
+        self.assertNotIn("whose unix id", dismiss)
         self.assertIn("Enter Full Screen", full)
         self.assertIn("AXFullScreen", full)
-        for text in (script, full):
+        self.assertLess(full.index("AXFullScreen"), full.index("click"))
+        self.assertIn("Don't Save", dismiss)
+        self.assertNotIn('is "Save"', dismiss)
+        for text in (script, full, dismiss):
             self.assertNotIn("keystroke", text)
             self.assertNotIn("key code", text)
         if shutil.which("osacompile") is not None:
             with tempfile.TemporaryDirectory() as compiled:
-                source = Path(compiled) / "full.applescript"
-                output = Path(compiled) / "full.scpt"
-                source.write_text(full, encoding="utf-8")
-                result = subprocess.run(
-                    ["osacompile", "-o", str(output), str(source)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
+                for name, source_text in (("full", full), ("dismiss", dismiss)):
+                    source = Path(compiled) / f"{name}.applescript"
+                    output = Path(compiled) / f"{name}.scpt"
+                    source.write_text(source_text, encoding="utf-8")
+                    result = subprocess.run(
+                        ["osacompile", "-o", str(output), str(source)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
         home = Path("/Users/me")
         real = real_editor_profile("darwin", {}, home)
         signed = "/Applications/Visual Studio Code.app/Contents/MacOS/Code"
@@ -2541,6 +2554,9 @@ class EditorTests(unittest.TestCase):
             self.assertEqual(saved["editor.fontSize"], 14)
             self.assertEqual(saved["window.restoreWindows"], "none")
             self.assertIs(saved["window.restoreFullscreen"], True)
+            self.assertEqual(saved["files.hotExit"], "off")
+            self.assertEqual(saved["window.confirmBeforeClose"], "never")
+            self.assertEqual(saved["files.readonlyInclude"], {"*": True, "**/*": True})
         from activitysim.editor import CodeEditor
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2568,16 +2584,22 @@ class EditorTests(unittest.TestCase):
                 "activitysim.editor.stop_editor"
             ) as stopped, patch(
                 "activitysim.editor.subprocess.Popen", side_effect=popen
-            ), patch.object(CodeEditor, "enter_fullscreen") as fullscreen:
+            ), patch.object(CodeEditor, "enter_fullscreen") as fullscreen, patch.object(
+                CodeEditor, "dismiss_save_prompt", return_value=False
+            ) as dismissed:
                 editor.open_folder(str(folder))
                 self.assertIn("--reuse-window", popped[0])
                 self.assertNotIn("--new-window", popped[0])
                 stopped.assert_called_once()
+                dismissed.assert_called()
                 fullscreen.assert_called_once()
+                self.assertEqual(fullscreen.call_args.kwargs.get("settle"), True)
                 stopped.reset_mock()
                 fullscreen.reset_mock()
+                dismissed.reset_mock()
                 editor.open_folder(str(folder))
                 stopped.assert_not_called()
+                dismissed.assert_called()
                 fullscreen.assert_called_once()
         self.assertEqual(parse_origin_size("10 20 800 600"), (10.0, 20.0, 810.0, 620.0))
         self.assertIsNone(parse_origin_size("0 0 10 10"))
@@ -2597,6 +2619,32 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(kinds.count("code"), 30)
         self.assertEqual(kinds.count("github"), 15)
         self.assertEqual(kinds.count("site"), 5)
+
+    def test_a_save_prompt_is_discarded_before_return(self) -> None:
+        runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
+        runner.can_point = True
+        runner.can_keys = True
+        seen = {"dismissed": 0, "fullscreen": 0}
+
+        def dismiss() -> bool:
+            seen["dismissed"] += 1
+            return True
+
+        def enter(settle: bool = False) -> None:
+            seen["fullscreen"] += 1
+
+        runner.editor.dismiss_save_prompt = dismiss  # type: ignore[method-assign]
+        runner.editor.enter_fullscreen = enter  # type: ignore[method-assign]
+        with redirect_stdout(StringIO()):
+            runner._quick_open("src/app.py")
+        self.assertGreaterEqual(seen["dismissed"], 2)
+        self.assertGreaterEqual(seen["fullscreen"], 2)
+        self.assertIn(("p", ("command",)), pointer.keys)
+        self.assertIn(("return", ()), pointer.keys)
+        self.assertLess(
+            pointer.keys.index(("p", ("command",))),
+            pointer.keys.index(("return", ())),
+        )
 
     def test_quick_open_types_a_file_only_while_the_editor_is_front(self) -> None:
         runner, _browser, pointer, _clock = make_runner(duration=4, seed=1)
