@@ -387,6 +387,11 @@ class Runner:
         if not (self.can_keys and self._arm_editor()):
             self.log("skipped keys, the editor is not in front")
             return
+        # Chat keeps focus across the folder switch and would take this path.
+        self._close_editor_chat()
+        if not self._editor_is_front():
+            self.log("skipped keys, the editor is not in front")
+            return
         self.pointer.hotkey("p", ("command",))
         self._sleep(0.12)
         if not self._editor_is_front():
@@ -445,6 +450,7 @@ class Runner:
         token = find_token(relative)
         if not token or not self._editor_is_front():
             return
+        self._close_editor_chat()
         if self._clear_save_prompt():
             self._sleep(0.15)
         if not self._editor_is_front():
@@ -482,6 +488,20 @@ class Runner:
             return False
         self._mark_driving()
         return True
+
+    def _close_editor_chat(self) -> None:
+        """Hide Chat and Claude Code before a path or a find token is typed."""
+
+        editor = self.editor
+        if editor is None:
+            return
+        close = getattr(editor, "close_chat_panel", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except (OSError, OsaError, ValueError, TypeError):
+            return
 
     def _clear_save_prompt(self) -> bool:
         """Don't Save, then restore full screen if that sheet left it.

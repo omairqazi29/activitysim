@@ -33,8 +33,9 @@ Browse public pages and move the pointer on your Mac or Windows PC.
 This checks out a public GitHub repository and opens that folder in one
 fullscreen Visual Studio Code window. Later repositories reuse that window.
 It has a separate profile, not the Code you are signed into. It opens files,
-scrolls, and searches in them. It does not save. If Code asks to save, it
-chooses Don't Save. GitHub is next: repositories
+scrolls, and searches in them. It closes the Chat and Claude Code side bar
+before it types, so a search is not entered there. It does not save. If Code
+asks to save, it chooses Don't Save. GitHub is next: repositories
 it has not already opened, and advanced
 search. About one chapter in ten is a public benchmark site such as DeepSWE,
 ProgramBench, SWE-bench, or Terminal-Bench. A site visit is short. A

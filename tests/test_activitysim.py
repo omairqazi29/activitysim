@@ -56,6 +56,7 @@ from activitysim.editor import (
     code_process_argv,
     editor_pids_from_ps,
     editor_pids_from_rows,
+    hide_chat_layouts,
     launch_code_command,
     list_sources,
     matches_editor_command,
@@ -64,6 +65,7 @@ from activitysim.editor import (
     real_editor_profile,
     repo_ok,
     assert_editor_profile,
+    script_close_chat,
     script_dismiss_save,
     script_editor_fullscreen,
     script_largest_window,
@@ -2482,6 +2484,10 @@ class EditorTests(unittest.TestCase):
             self.assertIn("--reuse-window", command)
             self.assertNotIn("--new-window", command)
             self.assertIn("--disable-workspace-trust", command)
+            self.assertIn("--disable-extension", command)
+            self.assertIn("anthropic.claude-code", command)
+            self.assertLess(command.index("--disable-extension"), command.index("anthropic.claude-code"))
+            self.assertLess(command.index("anthropic.claude-code"), len(command) - 1)
             self.assertIn(f"--user-data-dir={other.resolve()}", command)
             self.assertEqual(command[-1], str(folder.resolve()))
             with self.assertRaises(ValueError):
@@ -2491,22 +2497,30 @@ class EditorTests(unittest.TestCase):
         script = script_largest_window(42)
         full = script_editor_fullscreen(42)
         dismiss = script_dismiss_save(42)
+        close_chat = script_close_chat(42)
         self.assertIn("equal to 42", script)
         self.assertIn("equal to 42", full)
         self.assertIn("equal to 42", dismiss)
+        self.assertIn("equal to 42", close_chat)
         self.assertNotIn("whose unix id", full)
         self.assertNotIn("whose unix id", dismiss)
+        self.assertNotIn("whose unix id", close_chat)
         self.assertIn("Enter Full Screen", full)
         self.assertIn("AXFullScreen", full)
         self.assertLess(full.index("AXFullScreen"), full.index("click"))
+        self.assertIn("Secondary Side Bar", close_chat)
+        self.assertIn("Panel", close_chat)
+        self.assertNotIn("Primary Side Bar", close_chat)
+        self.assertNotIn('menu item "Chat"', close_chat)
+        self.assertLess(close_chat.index("AXMenuItemMarkChar"), close_chat.index("click mi"))
         self.assertIn("Don't Save", dismiss)
         self.assertNotIn('is "Save"', dismiss)
-        for text in (script, full, dismiss):
+        for text in (script, full, dismiss, close_chat):
             self.assertNotIn("keystroke", text)
             self.assertNotIn("key code", text)
         if shutil.which("osacompile") is not None:
             with tempfile.TemporaryDirectory() as compiled:
-                for name, source_text in (("full", full), ("dismiss", dismiss)):
+                for name, source_text in (("full", full), ("dismiss", dismiss), ("chat", close_chat)):
                     source = Path(compiled) / f"{name}.applescript"
                     output = Path(compiled) / f"{name}.scpt"
                     source.write_text(source_text, encoding="utf-8")
@@ -2557,6 +2571,8 @@ class EditorTests(unittest.TestCase):
             self.assertEqual(saved["files.hotExit"], "off")
             self.assertEqual(saved["window.confirmBeforeClose"], "never")
             self.assertEqual(saved["files.readonlyInclude"], {"*": True, "**/*": True})
+            self.assertEqual(saved["workbench.secondarySideBar.defaultVisibility"], "hidden")
+            self.assertIs(saved["chat.disableAIFeatures"], True)
         from activitysim.editor import CodeEditor
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2586,23 +2602,117 @@ class EditorTests(unittest.TestCase):
                 "activitysim.editor.subprocess.Popen", side_effect=popen
             ), patch.object(CodeEditor, "enter_fullscreen") as fullscreen, patch.object(
                 CodeEditor, "dismiss_save_prompt", return_value=False
-            ) as dismissed:
+            ) as dismissed, patch.object(CodeEditor, "close_chat_panel", return_value=False) as closed:
                 editor.open_folder(str(folder))
                 self.assertIn("--reuse-window", popped[0])
+                self.assertIn("--disable-extension", popped[0])
+                self.assertIn("anthropic.claude-code", popped[0])
                 self.assertNotIn("--new-window", popped[0])
                 stopped.assert_called_once()
                 dismissed.assert_called()
                 fullscreen.assert_called_once()
+                closed.assert_called_once()
                 self.assertEqual(fullscreen.call_args.kwargs.get("settle"), True)
                 stopped.reset_mock()
                 fullscreen.reset_mock()
                 dismissed.reset_mock()
+                closed.reset_mock()
                 editor.open_folder(str(folder))
                 stopped.assert_not_called()
                 dismissed.assert_called()
                 fullscreen.assert_called_once()
+                closed.assert_called_once()
         self.assertEqual(parse_origin_size("10 20 800 600"), (10.0, 20.0, 810.0, 620.0))
         self.assertIsNone(parse_origin_size("0 0 10 10"))
+        self._assert_chat_layout_stays_in_the_editor_profile()
+
+    def _assert_chat_layout_stays_in_the_editor_profile(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Application Support" / "vscode"
+            real = Path(tmp) / "Code"
+            real.mkdir()
+            storage = root / "User" / "workspaceStorage" / "abc"
+            storage.mkdir(parents=True)
+            db = storage / "state.vscdb"
+            connection = sqlite3.connect(db)
+            connection.execute("CREATE TABLE ItemTable (key TEXT UNIQUE, value TEXT)")
+            connection.execute(
+                "INSERT INTO ItemTable VALUES (?, ?)",
+                ("workbench.auxiliaryBar.hidden", "false"),
+            )
+            connection.execute(
+                "INSERT INTO ItemTable VALUES (?, ?)",
+                ("workbench.panel.hidden", "false"),
+            )
+            connection.execute(
+                "INSERT INTO ItemTable VALUES (?, ?)",
+                (
+                    "workbench.auxiliarybar.viewContainersWorkspaceState",
+                    json.dumps([
+                        {"id": "workbench.panel.chat", "visible": True, "pinned": True},
+                        {"id": "workbench.view.extension.claude-sidebar-secondary", "visible": True},
+                        {"id": "workbench.view.explorer", "visible": True},
+                    ]),
+                ),
+            )
+            connection.commit()
+            connection.close()
+            escaped = Path(tmp) / "escaped"
+            escaped.mkdir()
+            escaped_db = escaped / "state.vscdb"
+            connection = sqlite3.connect(escaped_db)
+            connection.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+            connection.execute(
+                "INSERT INTO ItemTable VALUES ('workbench.auxiliaryBar.hidden', 'false')"
+            )
+            connection.commit()
+            connection.close()
+            (storage.parent / "link").symlink_to(escaped, target_is_directory=True)
+            hide_chat_layouts(root, real)
+            connection = sqlite3.connect(db)
+            saved = dict(connection.execute("SELECT key, value FROM ItemTable"))
+            connection.close()
+            self.assertEqual(saved["workbench.auxiliaryBar.hidden"], "true")
+            self.assertEqual(saved["workbench.panel.hidden"], "true")
+            views = json.loads(saved["workbench.auxiliarybar.viewContainersWorkspaceState"])
+            by_id = {item["id"]: item["visible"] for item in views}
+            self.assertIs(by_id["workbench.panel.chat"], False)
+            self.assertIs(by_id["workbench.view.extension.claude-sidebar-secondary"], False)
+            self.assertIs(by_id["workbench.view.explorer"], True)
+            self.assertTrue(views[0]["pinned"])
+            connection = sqlite3.connect(escaped_db)
+            left = connection.execute("SELECT value FROM ItemTable").fetchone()
+            connection.close()
+            self.assertEqual(left[0], "false")
+            with self.assertRaises(ValueError):
+                hide_chat_layouts(real, real)
+
+        from activitysim.editor import CodeEditor
+
+        editor = CodeEditor()
+        editor.pid = 42
+        with patch("activitysim.editor.run_osascript", return_value="closed\n") as ran, patch.object(
+            CodeEditor, "enter_fullscreen"
+        ) as fullscreen:
+            if sys.platform == "win32":
+                self.assertFalse(editor.close_chat_panel())
+                ran.assert_not_called()
+            else:
+                self.assertTrue(editor.close_chat_panel())
+                self.assertIn("Secondary Side Bar", ran.call_args.args[0])
+                self.assertLess(
+                    ran.call_args.args[0].index("AXMenuItemMarkChar"),
+                    ran.call_args.args[0].index("click mi"),
+                )
+                fullscreen.assert_called_once()
+        with patch("activitysim.editor.run_osascript", return_value="clear"), patch.object(
+            CodeEditor, "enter_fullscreen"
+        ) as fullscreen:
+            if sys.platform != "win32":
+                self.assertFalse(editor.close_chat_panel())
+                fullscreen.assert_not_called()
 
     def test_code_deck_does_not_repeat_until_it_is_used(self) -> None:
         deck = CodeDeck(random.Random(3), ("pallets/flask", "encode/httpx", "cli/cli"))
@@ -2639,6 +2749,7 @@ class EditorTests(unittest.TestCase):
             runner._quick_open("src/app.py")
         self.assertGreaterEqual(seen["dismissed"], 2)
         self.assertGreaterEqual(seen["fullscreen"], 2)
+        self.assertGreaterEqual(runner.editor.closed_chat, 1)
         self.assertIn(("p", ("command",)), pointer.keys)
         self.assertIn(("return", ()), pointer.keys)
         self.assertLess(
@@ -2652,6 +2763,7 @@ class EditorTests(unittest.TestCase):
         runner.can_keys = True
         with redirect_stdout(StringIO()):
             runner._quick_open("src/app.py")
+        self.assertGreaterEqual(runner.editor.closed_chat, 1)
         self.assertIn(("p", ("command",)), pointer.keys)
         self.assertIn("src/app.py", pointer.typed)
         self.assertNotIn(("p", ()), pointer.keys)
@@ -2663,6 +2775,7 @@ class EditorTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             runner._quick_open("src/app.py")
             runner._quick_open("../secrets.txt")
+        self.assertEqual(runner.editor.closed_chat, 0)
         self.assertEqual(pointer.keys, [])
         self.assertEqual(pointer.typed, [])
 
