@@ -41,11 +41,13 @@ SEARCH_EXPRESSION = r"""
 
 RESULTS_EXPRESSION = r"""
 (() => {
-  var anchors = document.querySelectorAll("a[href]");
+  var root = document.querySelector("main") || document.body;
+  var anchors = root.querySelectorAll("a[href]");
   var links = [];
-  var limit = anchors.length < 400 ? anchors.length : 400;
+  var limit = anchors.length < 1200 ? anchors.length : 1200;
   for (var i = 0; i < limit; i++) {
     var el = anchors[i];
+    if (el.closest("header, nav, footer, [role=navigation], [role=contentinfo]")) continue;
     var href = el.href || "";
     var parsed;
     try {
@@ -59,6 +61,7 @@ RESULTS_EXPRESSION = r"""
     if (parts.length !== 2) continue;
     var rect = el.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) continue;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
     var title = (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200);
     links.push({
       href: parsed.href,

@@ -418,6 +418,187 @@ def editor_pids(profile: Path) -> list[int]:
     return editor_pids_from_ps(result.stdout, chosen)
 
 
+_UPDATE_MUTEX = "vscode-updating"
+_SETUP_SCRIPT = (
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    "Get-CimInstance -ClassName Win32_Process | "
+    "Where-Object { $_.Name -like 'CodeSetup-*' -and $_.CommandLine } | "
+    "ForEach-Object { "
+    "$cmd = $_.CommandLine -replace '[\\r\\n\\t]', ' '; "
+    "Write-Output ($_.ProcessId.ToString() + [char]9 + $cmd) "
+    "}"
+)
+
+
+def update_mutex_held(name: str = _UPDATE_MUTEX) -> bool:
+    """True when Visual Studio Code's Windows update mutex exists.
+
+    Code.exe will not open a window while `vscode-updating` is held. Other
+    platforms do not have the mutex.
+    """
+
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenMutexW(0x00100000, False, name)
+    if not handle:
+        return False
+    kernel32.CloseHandle(handle)
+    return True
+
+
+def cancel_flag_from_command(command: str) -> Path | None:
+    """The setup's `/cancel` file, and only when that file is under Temp.
+
+    A silent update publishes this path. Creating the file is how that setup
+    stops. A command that is not CodeSetup, or a flag outside Temp, is ignored.
+    """
+
+    if "CodeSetup-" not in command:
+        return None
+    quoted = re.search(r'/cancel="([^"]+)"', command)
+    plain = re.search(r"/cancel=(\S+)", command)
+    match = quoted or plain
+    if match is None:
+        return None
+    raw = Path(match.group(1))
+    if raw.name != "cancel.flag":
+        return None
+    temp = os.environ.get("TEMP") or os.environ.get("TMP") or ""
+    if not temp:
+        return None
+    try:
+        flag = raw.resolve()
+        root = Path(temp).resolve()
+    except OSError:
+        return None
+    if flag != root and root not in flag.parents:
+        return None
+    return flag
+
+
+def signal_update_cancel(commands: list[str]) -> list[Path]:
+    """Create each safe `/cancel` flag. The installer is left to notice it."""
+
+    written: list[Path] = []
+    for command in commands:
+        flag = cancel_flag_from_command(command)
+        if flag is None or flag in written:
+            continue
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_bytes(b"")
+        written.append(flag)
+    return written
+
+
+def setup_processes() -> list[tuple[int, str]]:
+    """Running CodeSetup processes as `(pid, command line)`."""
+
+    if sys.platform != "win32":
+        return []
+    from activitysim.winchrome import decode_process_output, powershell_path
+
+    exe = powershell_path()
+    if not exe.is_file():
+        return []
+    argv = [
+        str(exe),
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        _SETUP_SCRIPT,
+    ]
+    kwargs: dict = {"capture_output": True, "check": False, "timeout": 8}
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if flags:
+        kwargs["creationflags"] = flags
+    try:
+        result = subprocess.run(argv, **kwargs)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    text = decode_process_output(result.stdout or b"")
+    found: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        pid_text, sep, command = line.strip().partition("\t")
+        if not sep or not pid_text.isdigit() or not command.strip():
+            continue
+        found.append((int(pid_text), command.strip()))
+    return found
+
+
+def _stop_setup(pid: int) -> None:
+    if pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+
+
+def release_editor_update_lock(
+    commands: list[str] | None = None,
+    held: Callable[[], bool] | None = None,
+    sleeper=time.sleep,
+    wait: float = 20,
+) -> bool:
+    """Clear `vscode-updating` so a new Code window is allowed to open.
+
+    A silent update with `/nocloseapplications` does not close the Code that
+    is already running, and Code.exe will not open another window while the
+    mutex is held. The setup's own `/cancel` file is the way to stop it.
+    Returns False when the mutex is still held after `wait` seconds.
+    """
+
+    if held is None and commands is None and sys.platform != "win32":
+        return True
+    is_held = update_mutex_held if held is None else held
+    if not is_held():
+        return True
+    if commands is None:
+        rows = setup_processes()
+    else:
+        rows = [(0, command) for command in commands]
+    signal_update_cancel([command for _pid, command in rows])
+    polite = time.time() + min(5.0, wait)
+    while is_held() and time.time() < polite:
+        sleeper(0.25)
+    if is_held():
+        # The cancel file is the installer's own switch. A setup that is
+        # wedged on open Code files never reads it, so the process is stopped.
+        for pid, command in rows:
+            if cancel_flag_from_command(command):
+                _stop_setup(pid)
+    deadline = time.time() + wait
+    while is_held() and time.time() < deadline:
+        sleeper(0.25)
+    return not is_held()
+
+
+def editor_has_window(pid: int) -> bool:
+    """True when this process has a visible top-level window.
+
+    On macOS the process is enough: AppleScript finds the window later.
+    On Windows a Code.exe that is only waiting on the update mutex has a pid
+    and no window, and must not be treated as open.
+    """
+
+    if not pid or sys.platform != "win32":
+        return True
+    from activitysim.winchrome import window_bounds
+
+    try:
+        return window_bounds(pid) is not None
+    except OSError:
+        return False
+
+
 def stop_editor(profile: Path) -> None:
     """Close activitysim's Code windows. The signed-in Code is not signaled.
 
@@ -1007,6 +1188,7 @@ class CodeEditor:
         self.pid: int | None = None
         self.folder: str | None = None
         self._process: subprocess.Popen[str] | None = None
+        self._window_timeout: float | None = None
 
     def installed(self) -> bool:
         return find_code() is not None
@@ -1027,6 +1209,8 @@ class CodeEditor:
         # A restored checkout shows Chat in the secondary side bar. Hide that
         # in the saved layout before this folder is loaded.
         hide_chat_layouts(profile)
+        if sys.platform == "win32" and not release_editor_update_lock():
+            raise OsaError("Visual Studio Code is being updated, so its window did not open")
         command = launch_code_command(binary, Path(folder), profile)
         process = subprocess.Popen(
             command,
@@ -1036,6 +1220,9 @@ class CodeEditor:
             text=True,
         )
         self._adopt(profile, process)
+        if not self.pid or not editor_has_window(self.pid):
+            self.pid = None
+            raise OsaError("Visual Studio Code did not open a window")
         time.sleep(0.4 if running else 1.0)
         self.folder = str(folder)
         # Reusing the window with a dirty file raises Save / Don't Save and
@@ -1047,24 +1234,24 @@ class CodeEditor:
         self.close_chat_panel()
 
     def _adopt(self, profile: Path, process: subprocess.Popen[str]) -> None:
-        deadline = time.time() + 8
+        timeout = 8.0 if self._window_timeout is None else self._window_timeout
+        if sys.platform == "win32" and self._window_timeout is None:
+            timeout = 20.0
+        deadline = time.time() + timeout
         while time.time() < deadline:
             found = editor_pids(profile)
+            chosen: int | None = None
             if process.pid in found:
+                chosen = process.pid
+            elif found:
+                chosen = found[-1]
+            if chosen is not None and editor_has_window(chosen):
                 self._process = process
-                self.pid = process.pid
+                self.pid = chosen
                 return
-            if found:
-                self.pid = found[-1]
-                if self._process is None or self._process.poll() is not None:
-                    self._process = process
-                return
-            if process.poll() is not None:
+            if process.poll() is not None and not found:
                 break
             time.sleep(0.1)
-        if self.pid is None:
-            self._process = process
-            self.pid = process.pid
 
     def close_chat_panel(self) -> bool:
         """Hide Chat and Claude Code when their part is open.

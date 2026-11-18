@@ -188,6 +188,15 @@ def build_run_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, help="random seed, so a session can be repeated")
     parser.add_argument(
+        "--only",
+        choices=("github", "code"),
+        help=(
+            "github runs GitHub advanced search only. "
+            "code runs Visual Studio Code only. "
+            "The default session does the editor, then GitHub, then an occasional benchmark site"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the session without opening Chrome or moving anything",
@@ -231,6 +240,7 @@ def validate_run(args: argparse.Namespace) -> Config:
         no_keyboard=args.no_keyboard,
         dry_run=args.dry_run,
         seed=args.seed,
+        only=args.only,
     )
 
 

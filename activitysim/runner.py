@@ -71,6 +71,7 @@ class Config:
     min_gap: float = 0.45
     max_gap: float = 1.6
     pause: float = 30
+    only: str | None = None
     max_tabs: int = 5
     duration: float = 0
     startup_delay: float = 0.3
@@ -142,7 +143,6 @@ class Runner:
         self.repo_reads = 0
         self._sourced = False
         self._driving: str | None = None
-        self._github_repo = True
         self.code_files: list[str] = []
         self.code_i = 0
         self.code_phase = "open"
@@ -279,6 +279,14 @@ class Runner:
     def _begin_chapter(self) -> None:
         if not self._started:
             self._started = True
+            if self.config.only == "github":
+                self._start_github()
+                return
+            if self.config.only == "code":
+                if not self._code_available():
+                    raise OsaError("Visual Studio Code or git is not available")
+                self._start_code()
+                return
             if self._code_available():
                 self._start_code()
             else:
@@ -297,6 +305,10 @@ class Runner:
             self._start_github()
 
     def _next_kind(self) -> str:
+        if self.config.only == "github":
+            return "search"
+        if self.config.only == "code":
+            return "code"
         if not self._kinds:
             kinds = list(CHAPTER_DECK)
             self.rng.shuffle(kinds)
@@ -311,28 +323,37 @@ class Runner:
         except (OSError, OsaError, ValueError, AttributeError):
             return False
 
-    def _start_github(self) -> None:
-        self.log("chapter github")
-        if self._github_repo:
-            self._github_repo = False
-            self._start_repo()
+    def _leave_code(self) -> None:
+        """A code-only run stays in the editor. A normal run can move on to GitHub."""
+
+        if self.config.only == "code":
             return
-        self._github_repo = True
+        self._start_github()
+
+    def _start_github(self) -> None:
+        """Advanced search, then click repositories GitHub returns.
+
+        A fixed list of repository URLs is not opened here. Typing one of
+        those addresses lands in the page search box when the address bar
+        did not take focus.
+        """
+
+        self.log("chapter github")
         self._search()
 
     def _start_code(self) -> None:
         if not self._code_available():
-            self._start_github()
+            self._leave_code()
             return
         try:
             repo = self.work.next_repo()
             folder = self.work.checkout(repo)
         except (OSError, OsaError, ValueError, AttributeError):
-            self._start_github()
+            self._leave_code()
             return
         if not folder:
-            self.log(f"skip checkout {repo}")
-            self._start_github()
+            self.log(f"skip checkout {repo}", error=self.config.only == "code")
+            self._leave_code()
             return
         try:
             found = self.work.files(folder) or []
@@ -344,8 +365,8 @@ class Runner:
             if isinstance(path, str) and can_type(path) and ".." not in path.split("/")
         ]
         if not files:
-            self.log(f"skip checkout {repo}")
-            self._start_github()
+            self.log(f"skip checkout {repo}", error=self.config.only == "code")
+            self._leave_code()
             return
         self.rng.shuffle(files)
         count = min(len(files), self.rng.randint(4, 6))
@@ -358,7 +379,7 @@ class Runner:
             self.editor.open_folder(str(folder))
         except (OSError, OsaError, ValueError) as exc:
             self.log(f"step failed: {exc}", error=True)
-            self._start_github()
+            self._leave_code()
             return
         self._announce()
         self.actions.append("code")
@@ -684,11 +705,6 @@ class Runner:
         self.per_query = self.rng.randint(3, 5)
         self.log(f"github advanced search: {query}")
         self.actions.append("search")
-        if not self._window_open():
-            self._open_fresh(ADVANCED_URL)
-        elif self.can_keys and not self._on_advanced():
-            self._type_url(ADVANCED_URL)
-            self._settle()
         self._submit_query(query)
         self.points = self._collect_results()
         self.pi = 0
@@ -696,31 +712,19 @@ class Runner:
         self.log(f"{len(self.points)} results to click")
 
     def _submit_query(self, query: str) -> None:
-        box = self._search_box()
-        clicked = False
-        if box is not None and self.can_point:
-            clicked = self._click(box, "advanced search box")
-            self._sleep(0.15)
-        if (
-            clicked
-            and self._text_focused()
-            and not self._popup_blocks_keys()
-            and self.can_keys
-            and can_type(query)
-            and self._our_window_is_front()
-        ):
-            self.pointer.hotkey("a", ("command",))
-            self.pointer.type_text(query)
-            self.pointer.hotkey("return", ())
-            target = results_url(query)
-            self.results_url = target
-            self._remember_navigation(target)
-            self.log(f"typed {query}")
-            self._settle()
-            return
+        """Open the repository results for this query.
+
+        GitHub's search box rewrites a typed query as it autocompletes, and
+        Enter then searches code. The results address keeps the query and
+        asks for repositories.
+        """
+
         target = results_url(query)
         self.results_url = target
-        self.browser.navigate(target)
+        if self._window_open():
+            self.browser.navigate(target)
+        else:
+            self.browser.open_window(target)
         self._remember_navigation(target)
         self.log(f"open {target}")
         self._settle()
@@ -882,12 +886,17 @@ class Runner:
             return True
 
     def _omnibox_is_safe(self) -> bool:
-        """Enter may go to the omnibox, not to a dialog's default button."""
+        """Enter may go to the address bar, not to the page search box or a dialog.
+
+        On macOS the address bar reports itself as a text field. On Windows the
+        page keeps document.activeElement, so a search box that still has the
+        caret must not receive the URL.
+        """
 
         if self._popup_blocks_keys():
             return False
         if sys.platform == "win32" and callable(getattr(self.browser, "main_window_is_front", None)):
-            return True
+            return not self._text_focused()
         return self._text_focused()
 
     def _window_open(self) -> bool:

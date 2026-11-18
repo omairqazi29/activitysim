@@ -179,16 +179,21 @@ def launch_command(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-sync",
-        "--use-mock-keychain",
         "--no-service-autorun",
         "--disable-background-networking",
         f"--remote-debugging-port={port}",
         f"--remote-allow-origins=http://127.0.0.1:{port}",
-        f"--host-resolver-rules={rules}",
         "--new-window",
         url,
     ]
     which = sys.platform if system is None else system
+    # macOS uses a mock keychain so the signed-out profile cannot touch the
+    # login keychain. host-resolver-rules blocks X there. Windows Chrome puts
+    # both on the "unsupported command-line flag" bar, which covers GitHub.
+    # Windows still refuses those URLs before navigation.
+    if which != "win32":
+        command.insert(-1, "--use-mock-keychain")
+        command.insert(-1, f"--host-resolver-rules={rules}")
     if which == "win32":
         command.insert(-1, "--start-fullscreen")
     return command

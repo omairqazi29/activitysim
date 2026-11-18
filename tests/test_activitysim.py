@@ -209,6 +209,7 @@ def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeCloc
         no_keyboard=overrides.pop("no_keyboard", False),
         dry_run=True,
         seed=seed,
+        only=overrides.pop("only", None),
     )
     places = Places(rng, overrides.pop("extra", []))
     front = overrides.pop("front", None)
@@ -857,11 +858,23 @@ class SearchGeometryTests(unittest.TestCase):
         self.assertIsNotNone(point)
         assert point is not None
         self.assertTrue(in_search_zone(point, self.bounds))
+        # Measured on a 1920x1080 fullscreen window at 125% DPI.
+        windows = (0.0, 0.0, 1920.0, 1080.0)
+        self.assertTrue(in_search_zone((925.5, 366.1), windows, 1.25))
+        self.assertFalse(in_search_zone((400.0, 500.0), windows, 1.25))
 
     def test_result_links_reject_star_and_filters(self) -> None:
         self.assertTrue(is_result_href("https://github.com/python/cpython"))
         self.assertFalse(is_result_href("https://github.com/topics/python"))
         self.assertFalse(is_result_href("https://github.com/python/cpython/stargazers"))
+        self.assertFalse(is_result_href("https://github.com/features/copilot"))
+        self.assertFalse(is_result_href("https://github.com/solutions/industry"))
+        self.assertFalse(is_result_href("https://github.com/enterprise/startups"))
+        self.assertFalse(is_result_href("https://github.com/security/advanced-security"))
+        self.assertFalse(is_result_href("https://github.com/resources/articles"))
+        self.assertFalse(is_result_href("https://github.com/open-source/sponsors"))
+        self.assertIn("closest", RESULTS_EXPRESSION)
+        self.assertIn("header", RESULTS_EXPRESSION)
         self.assertTrue(bad_label("Star this repository"))
         good = (700.0, 400.0)
         self.assertTrue(
@@ -1700,9 +1713,9 @@ class WindowsLogicTests(unittest.TestCase):
         )
         self.assertEqual(command[-2], "--start-fullscreen")
         self.assertEqual(command[-1], "https://github.com/search/advanced")
-        self.assertIn("--use-mock-keychain", command)
+        self.assertNotIn("--use-mock-keychain", command)
+        self.assertNotIn("--host-resolver-rules", " ".join(command))
         self.assertIn("--disable-sync", command)
-        self.assertIn("MAP x.com ~NOTFOUND", " ".join(command))
         self.assertNotIn("tell application", " ".join(command))
 
     def test_awake_banner_stays_pmset_on_mac(self) -> None:
@@ -2128,7 +2141,8 @@ class WindowAndInputTests(unittest.TestCase):
             runner.run()
         for point in wanted:
             self.assertIn(point, pointer.clicks)
-        self.assertIn((400.0, 200.0), pointer.clicks)
+        self.assertNotIn((400.0, 200.0), pointer.clicks)
+        self.assertIn("type=repositories", browser.current_url())
         for point in result_points(browser.bounds_value):
             self.assertNotIn(point, pointer.clicks)
 
@@ -2160,7 +2174,8 @@ class WindowAndInputTests(unittest.TestCase):
         self.assertTrue(pointer.clicks)
         box = search_box_point(browser.bounds_value)
         self.assertIsNotNone(box)
-        self.assertIn(box, pointer.clicks)
+        self.assertNotIn(box, pointer.clicks)
+        self.assertIn("type=repositories", browser.current_url())
 
         runner, browser, pointer, _clock = make_runner(duration=20, seed=3)
         prefer_search(runner)
@@ -2171,7 +2186,9 @@ class WindowAndInputTests(unittest.TestCase):
         runner.find_results = lambda _bounds: [(500.0, 500.0), (520.0, 600.0)]
         with redirect_stdout(StringIO()):
             runner.run()
-        self.assertIn((400.0, 400.0), pointer.clicks)
+        self.assertNotIn((400.0, 400.0), pointer.clicks)
+        self.assertIn((500.0, 500.0), pointer.clicks)
+        self.assertIn("type=repositories", browser.current_url())
 
         tall = (0.0, 0.0, 1400.0, 1800.0)
         measured = _Page({
@@ -2201,8 +2218,9 @@ class WindowAndInputTests(unittest.TestCase):
         assert scaled is not None and plain is not None
         self.assertEqual(scaled[1], bounds[1] + 350)
         self.assertNotEqual(scaled, plain)
-        self.assertIn(scaled, pointer.clicks)
+        self.assertNotIn(scaled, pointer.clicks)
         self.assertNotIn(plain, pointer.clicks)
+        self.assertIn("type=repositories", browser.current_url())
 
         low = (500.0, 250.0)
         kept = [(500.0, 450.0), (520.0, 600.0)]
@@ -2250,23 +2268,23 @@ class WindowAndInputTests(unittest.TestCase):
 
         advanced = "https://github.com/search/advanced"
 
-        def step_off_advanced(front: bool) -> FakePointer:
+        def step_off_advanced(front: bool, role: str = "AXTextField"):
             runner, browser, pointer, _clock = make_runner(duration=16, seed=4)
             browser.open_window("https://github.com/")
             self.assertNotEqual(browser.current_url(), advanced)
             browser.main_window_is_front = lambda: front
+            runner.focused_role = lambda: role
             with redirect_stdout(StringIO()):
                 self.assertTrue(runner._prepare_input())
                 runner._search()
-            return pointer
+            return browser, pointer
 
-        blocked = step_off_advanced(False)
-        self.assertFalse(any(key == "return" for key, _mods in blocked.keys))
-        self.assertNotIn(advanced, blocked.typed)
-        self.assertFalse(any("://" in text for text in blocked.typed))
-        opened = step_off_advanced(True)
-        self.assertIn(advanced, opened.typed)
-        self.assertTrue(any(key == "return" for key, _mods in opened.keys))
+        for front, role in ((False, "AXTextField"), (True, "AXTextField"), (True, "")):
+            browser, pointer = step_off_advanced(front, role)
+            self.assertNotIn(advanced, pointer.typed)
+            self.assertFalse(any(text.startswith("https://github.com/") and "/search" not in text for text in pointer.typed))
+            self.assertIn("type=repositories", browser.current_url())
+            self.assertIn("/search?q=", browser.current_url())
 
     def test_page_adapters_and_dialog_focus(self) -> None:
         bounds = (0.0, 0.0, 1400.0, 900.0)
@@ -2647,6 +2665,10 @@ class EditorTests(unittest.TestCase):
             ), patch("activitysim.editor.editor_pids", return_value=[4242]), patch(
                 "activitysim.editor.stop_editor"
             ) as stopped, patch(
+                "activitysim.editor.release_editor_update_lock", return_value=True
+            ), patch(
+                "activitysim.editor.editor_has_window", return_value=True
+            ), patch(
                 "activitysim.editor.subprocess.Popen", side_effect=popen
             ), patch.object(CodeEditor, "enter_fullscreen") as fullscreen, patch.object(
                 CodeEditor, "dismiss_save_prompt", return_value=False
@@ -2670,9 +2692,77 @@ class EditorTests(unittest.TestCase):
                 dismissed.assert_called()
                 fullscreen.assert_called_once()
                 closed.assert_called_once()
+        self._assert_a_silent_update_can_be_cancelled()
+        self._assert_a_windowless_editor_is_refused()
         self.assertEqual(parse_origin_size("10 20 800 600"), (10.0, 20.0, 810.0, 620.0))
         self.assertIsNone(parse_origin_size("0 0 10 10"))
         self._assert_chat_layout_stays_in_the_editor_profile()
+
+    def _assert_a_silent_update_can_be_cancelled(self) -> None:
+        from activitysim.editor import cancel_flag_from_command, release_editor_update_lock
+
+        flag = Path(tempfile.gettempdir()) / "activitysim-cancel-test" / "cancel.flag"
+        if flag.exists():
+            flag.unlink()
+        command = f'CodeSetup-stable-abc.exe /verysilent /nocloseapplications /cancel="{flag}"'
+        self.assertEqual(cancel_flag_from_command(command), flag.resolve())
+        self.assertIsNone(cancel_flag_from_command(f'/cancel="{flag}"'))
+        outside = r'C:\Windows\System32\cancel.flag' if sys.platform == "win32" else "/etc/cancel.flag"
+        self.assertIsNone(
+            cancel_flag_from_command(
+                f'CodeSetup-stable-abc.exe /cancel="{outside}"'
+            )
+        )
+        seen = {"n": 0}
+
+        def held() -> bool:
+            seen["n"] += 1
+            return seen["n"] < 3
+
+        self.assertTrue(
+            release_editor_update_lock(
+                commands=[command],
+                held=held,
+                sleeper=lambda _seconds: None,
+                wait=5,
+            )
+        )
+        self.assertTrue(flag.is_file())
+        flag.unlink()
+        flag.parent.rmdir()
+
+    def _assert_a_windowless_editor_is_refused(self) -> None:
+        from activitysim.editor import CodeEditor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "repo"
+            folder.mkdir()
+            profile_dir = Path(tmp) / "vscode"
+            binary = Path(tmp) / "Code"
+            binary.write_text("", encoding="utf-8")
+
+            class Proc:
+                pid = 4242
+
+                def poll(self):
+                    return None
+
+            editor = CodeEditor()
+            editor._window_timeout = 0
+            with patch("activitysim.editor.find_code", return_value=binary), patch(
+                "activitysim.editor.editor_profile_path", return_value=profile_dir
+            ), patch("activitysim.editor.editor_pids", return_value=[4242]), patch(
+                "activitysim.editor.stop_editor"
+            ), patch(
+                "activitysim.editor.release_editor_update_lock", return_value=True
+            ), patch(
+                "activitysim.editor.editor_has_window", return_value=False
+            ), patch(
+                "activitysim.editor.subprocess.Popen", return_value=Proc()
+            ):
+                with self.assertRaises(OsaError):
+                    editor.open_folder(str(folder))
+            self.assertIsNone(editor.pid)
 
     def _assert_chat_layout_stays_in_the_editor_profile(self) -> None:
         import sqlite3
@@ -2846,6 +2936,51 @@ class EditorTests(unittest.TestCase):
             self.assertTrue(in_editor_body(point, runner.editor.bounds_value))
         moves = [key for key, _mods in pointer.keys if key in {"down", "up", "pagedown", "pageup"}]
         self.assertGreaterEqual(len(moves), 4)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows address bar focus")
+    def test_a_focused_page_search_box_does_not_receive_the_url(self) -> None:
+        runner, browser, pointer, _clock = make_runner(duration=4, seed=1)
+        browser.main_window_is_front = lambda: True  # type: ignore[attr-defined]
+        browser.open_window("https://github.com/search/advanced")
+        runner.can_point = True
+        runner.can_keys = True
+        url = "https://github.com/python/cpython"
+        with redirect_stdout(StringIO()):
+            runner._type_url(url)
+        self.assertNotIn(url, pointer.typed)
+        self.assertEqual(browser.current_url(), url)
+
+        runner.focused_role = lambda: ""
+        pointer.typed.clear()
+        address = "https://github.com/search/advanced"
+        with redirect_stdout(StringIO()):
+            runner._type_url(address)
+        self.assertIn(address, pointer.typed)
+
+    def test_github_only_uses_advanced_search(self) -> None:
+        runner, browser, pointer, _clock = make_runner(duration=12, seed=3, only="github")
+        with redirect_stdout(StringIO()):
+            runner.run()
+        self.assertTrue(any("advanced search" in line for line in runner.history))
+        self.assertFalse(any(line.startswith("chapter code") for line in runner.history))
+        self.assertFalse(any(line.startswith("chapter site") for line in runner.history))
+        self.assertTrue(browser.window_id)
+        for line in runner.history:
+            if "https://github.com/" not in line:
+                continue
+            self.assertIn("/search", line, line)
+        for text in pointer.typed:
+            if "https://github.com/" not in text:
+                continue
+            self.assertIn("/search", text, text)
+
+    def test_code_only_does_not_open_chrome(self) -> None:
+        runner, browser, _pointer, _clock = make_runner(duration=8, seed=3, only="code")
+        with redirect_stdout(StringIO()):
+            runner.run()
+        self.assertTrue(any(line.startswith("chapter code ") for line in runner.history))
+        self.assertFalse(any("advanced search" in line for line in runner.history))
+        self.assertIsNone(browser.window_id)
 
     def test_without_an_editor_the_session_starts_on_github(self) -> None:
         runner, _browser, _pointer, _clock = make_runner(duration=8, seed=2)

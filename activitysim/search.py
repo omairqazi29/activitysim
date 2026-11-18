@@ -45,6 +45,12 @@ _SKIP_OWNERS = frozenset({
     "pricing",
     "customer-stories",
     "readme",
+    "solutions",
+    "enterprise",
+    "security",
+    "resources",
+    "open-source",
+    "collections",
 })
 
 _BAD_PHRASES = (
@@ -117,13 +123,17 @@ def _height(bounds: Rect) -> float:
 
 
 def in_search_zone(point: Point, bounds: Rect, scale: float = 1.0) -> bool:
-    """Search band under the toolbar. scale is physical pixels per CSS pixel."""
+    """Search band under the toolbar. scale is physical pixels per CSS pixel.
+
+    The lower edge is 320 CSS pixels. On a fullscreen Windows window at
+    125% DPI the GitHub advanced query sits just below 280.
+    """
 
     x, y = point
     left, top, right, _bottom = bounds
     return (
         (left + 60 * scale) <= x <= (right - 60 * scale)
-        and (top + 110 * scale) <= y <= (top + 280 * scale)
+        and (top + 110 * scale) <= y <= (top + 320 * scale)
     )
 
 
