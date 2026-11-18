@@ -43,7 +43,15 @@ from activitysim.chrome import (
     script_fullscreen,
     scrub_signins,
 )
-from activitysim.cli import _doctor_windows, main, parse_duration, root_error, root_message, validate_run
+from activitysim.cli import (
+    _doctor_windows,
+    main,
+    parse_duration,
+    root_error,
+    root_message,
+    shut_down,
+    validate_run,
+)
 from activitysim.editor import (
     CODE_REPOS,
     clone_command,
@@ -1215,6 +1223,17 @@ class CliTests(unittest.TestCase):
             self.assertIn("Administrator", message)
         else:
             self.assertIn("sudo", message)
+
+    def test_exit_closes_activitysim_chrome_and_code(self) -> None:
+        browser = FakeBrowser()
+        browser.open_window("https://example.com/")
+        with patch("activitysim.editor.stop_editor") as stop:
+            shut_down(browser, dry_run=False)
+        self.assertIsNone(browser.window_id)
+        stop.assert_called_once()
+        with patch("activitysim.editor.stop_editor") as stop:
+            shut_down(browser, dry_run=True)
+        stop.assert_not_called()
 
     def test_default_gaps_stay_short(self) -> None:
         config = Config()

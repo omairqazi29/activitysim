@@ -24,7 +24,7 @@ sudo pmset -a disablesleep 1
 python3 -m activitysim
 ```
 
-Stop it with Ctrl+C. The signed-out Chrome window stays open. Restore sleep later:
+Stop it with Ctrl+C. That closes activitysim's Chrome and Visual Studio Code. Your own Chrome and Code stay open. Restore sleep later:
 
 ```bash
 sudo pmset -a disablesleep 0
@@ -41,7 +41,7 @@ Install Python 3.9 or newer and Google Chrome, then:
 python -m activitysim
 ```
 
-Stop it with Ctrl+C. The signed-out Chrome window stays open.
+Stop it with Ctrl+C. That closes activitysim's Chrome and Visual Studio Code. Your own Chrome and Code stay open.
 
 `--caffeinate` calls `SetThreadExecutionState` and keeps this process awake
 until it exits. It does not change the power plan.

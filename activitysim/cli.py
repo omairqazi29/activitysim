@@ -179,7 +179,7 @@ def build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--close-on-exit",
         action="store_true",
-        help="close the simulator window when the program stops",
+        help="accepted for old commands. Ctrl+C already closes activitysim's Chrome and Code",
     )
     parser.add_argument(
         "--urls",
@@ -277,6 +277,23 @@ def main(argv: list[str] | None = None) -> int:
     return run(config, args)
 
 
+def shut_down(browser, *, dry_run: bool) -> None:
+    """Close activitysim's Chrome and Code. The signed-in apps are left alone."""
+
+    if dry_run or browser is None:
+        return
+    try:
+        browser.close_window()
+    except OsaError as exc:
+        print(f"could not close the simulator window: {exc}", file=sys.stderr)
+    try:
+        from activitysim.editor import editor_profile_path, stop_editor
+
+        stop_editor(editor_profile_path())
+    except (OSError, ValueError) as exc:
+        print(f"could not close Visual Studio Code: {exc}", file=sys.stderr)
+
+
 def run(config: Config, args: argparse.Namespace) -> int:
     seed = config.seed if config.seed is not None else random.SystemRandom().randrange(1, 2**31)
     config.seed = seed
@@ -366,11 +383,7 @@ def run(config: Config, args: argparse.Namespace) -> int:
         print(f"Chrome: {exc}", file=sys.stderr)
         return 1
     finally:
-        if args.close_on_exit and browser is not None and not config.dry_run:
-            try:
-                browser.close_window()
-            except OsaError as exc:
-                print(f"could not close the simulator window: {exc}", file=sys.stderr)
+        shut_down(browser, dry_run=config.dry_run)
         if awake:
             from activitysim.winchrome import ES_CONTINUOUS, set_execution_state
 
