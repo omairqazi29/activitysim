@@ -1837,6 +1837,7 @@ class _WindowUser32:
         self.shown: list[tuple[int, int]] = []
         self.attached: list[tuple[int, int, bool]] = []
         self.closed: list[int] = []
+        self.keys: list[tuple[int, int]] = []
         self.fail_foreground = False
 
     def EnumWindows(self, callback, _lparam):
@@ -1888,6 +1889,9 @@ class _WindowUser32:
             raise OSError("foreground failed")
         self.foreground = int(hwnd)
         return 1
+
+    def keybd_event(self, vk, _scan, flags, _extra):
+        self.keys.append((int(vk), int(flags)))
 
     def PostMessageW(self, hwnd, message, _wparam, _lparam):
         self.closed.append((int(hwnd), int(message)))
@@ -1984,6 +1988,19 @@ class WindowAndInputTests(unittest.TestCase):
             winchrome.maximize(42)
         self.assertEqual(fake.closed, [(5, WM_CLOSE)])
         self.assertIn((5, SW_MAXIMIZE), fake.shown)
+        fake.keys.clear()
+        fake.foreground = 5
+        with patch("activitysim.winchrome._user32", return_value=fake), patch(
+            "activitysim.winchrome._kernel32", return_value=kernel
+        ):
+            winchrome.activate(42)
+        self.assertEqual(fake.keys, [])
+        fake.foreground = 8
+        with patch("activitysim.winchrome._user32", return_value=fake), patch(
+            "activitysim.winchrome._kernel32", return_value=kernel
+        ):
+            winchrome.activate(42)
+        self.assertEqual([vk for vk, _flags in fake.keys], [0x12, 0x12, 0x1B, 0x1B])
 
     def test_chrome_window_methods_on_win32(self) -> None:
         browser = Chrome.__new__(Chrome)

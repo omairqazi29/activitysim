@@ -409,8 +409,21 @@ def main_window_is_front(pid: int) -> bool:
     return int(front) == int(hwnd)
 
 
+def _tap_key(user32, vk: int) -> None:
+    tap = getattr(user32, "keybd_event", None)
+    if not callable(tap):
+        return
+    tap(vk, 0, 0, 0)
+    tap(vk, 0, 0x0002, 0)
+
+
 def activate(pid: int) -> None:
-    """Restore the window if iconic, then SetForegroundWindow. No keystrokes."""
+    """Restore the window and bring it forward.
+
+    Alt is tapped only when another app is in front. Tapping it while
+    Visual Studio Code is already in front opens the File menu, and the
+    next Enter chooses Open File or Open Folder.
+    """
 
     ensure_process_dpi()
     user32 = _user32()
@@ -428,18 +441,19 @@ def activate(pid: int) -> None:
     attached = False
     if foreground_thread and foreground_thread != this_thread:
         attached = bool(user32.AttachThreadInput(this_thread, foreground_thread, True))
+    already = bool(foreground) and int(foreground) == int(hwnd)
     try:
-        # A normal SetForegroundWindow is ignored while the user is in another
-        # app. An Alt tap is input from this process, which lets the new
-        # Code window come forward instead of staying behind GitHub.
-        tap = getattr(user32, "keybd_event", None)
-        if callable(tap):
-            tap(0x12, 0, 0, 0)
-            tap(0x12, 0, 0x0002, 0)
-        top = getattr(user32, "BringWindowToTop", None)
-        if callable(top):
-            top(hwnd)
+        if not already:
+            # SetForegroundWindow is ignored while another app is in front.
+            # Alt counts as input from this process. Escape then closes the
+            # menu bar that Alt armed, before Quick Open runs.
+            _tap_key(user32, 0x12)
+            top = getattr(user32, "BringWindowToTop", None)
+            if callable(top):
+                top(hwnd)
         user32.SetForegroundWindow(hwnd)
+        if not already:
+            _tap_key(user32, 0x1B)
     finally:
         if attached:
             user32.AttachThreadInput(this_thread, foreground_thread, False)
