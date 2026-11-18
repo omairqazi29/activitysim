@@ -166,6 +166,32 @@ from activitysim.search import (
 )
 
 
+def try_symlink(link: Path, target: Path, *, directory: bool = False) -> bool:
+    """Create a symlink. False when Windows denies SeCreateSymbolicLinkPrivilege."""
+
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError:
+        return False
+    return True
+
+
+def try_dir_link(link: Path, target: Path) -> bool:
+    """Link a directory. A junction is the unprivileged Windows stand-in."""
+
+    if try_symlink(link, target, directory=True):
+        return True
+    if sys.platform != "win32":
+        return False
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and link.exists()
+
+
 def make_runner(**overrides) -> tuple[Runner, FakeBrowser, FakePointer, FakeClock]:
     clock = FakeClock()
     browser = FakeBrowser()
@@ -436,7 +462,10 @@ class LockedChromeTests(unittest.TestCase):
             cookies.parent.mkdir(parents=True)
             cookies.write_text("session", encoding="utf-8")
             link = profile / "Default" / "Login Data"
-            link.symlink_to(outside)
+            # File symlinks need an extra privilege on Windows. A normal file
+            # still has to be removed, and the outside file has to stay.
+            if not try_symlink(link, outside):
+                link.write_text("local-session", encoding="utf-8")
             encrypted = profile / "Default" / "Sessions_Encrypted"
             encrypted.mkdir()
             (encrypted / "Session_1").write_text("old windows", encoding="utf-8")
@@ -704,6 +733,7 @@ class InputPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 assert_typable(text)
 
+    @unittest.skipUnless(sys.platform == "darwin", "CoreFoundation Accessibility prompt")
     def test_permission_dictionary_builds_without_prompting(self) -> None:
         self.assertTrue(accessibility_prompt_dictionary())
 
@@ -911,7 +941,11 @@ class RunnerTests(unittest.TestCase):
         self.assertIsNone(browser.window_id)
         self.assertEqual(pointer.clicks, [])
         self.assertEqual(pointer.keys, [])
-        self.assertTrue(any("Accessibility" in line for line in runner.history))
+        if sys.platform == "win32":
+            self.assertTrue(any("pointer could not be moved" in line for line in runner.history))
+            self.assertTrue(any("Administrator" in line for line in runner.history))
+        else:
+            self.assertTrue(any("Accessibility" in line for line in runner.history))
 
     def test_mouse_move_pauses_and_then_stops_for_the_duration(self) -> None:
         runner, _browser, pointer, clock = make_runner(
@@ -1014,7 +1048,11 @@ class RunnerTests(unittest.TestCase):
         with redirect_stdout(stdout), redirect_stderr(stderr):
             runner.run()
         self.assertNotIn("launching dev browser", stdout.getvalue())
-        self.assertIn("Accessibility", stderr.getvalue())
+        if sys.platform == "win32":
+            self.assertIn("pointer could not be moved", stderr.getvalue())
+            self.assertIn("Administrator", stderr.getvalue())
+        else:
+            self.assertIn("Accessibility", stderr.getvalue())
 
     def test_later_chapters_open_benchmarks_and_fresh_repos(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=160, seed=3)
@@ -1159,7 +1197,11 @@ class CliTests(unittest.TestCase):
 
     def test_root_is_refused(self) -> None:
         self.assertIsNone(root_error(501))
-        self.assertIn("sudo", root_error(0) or "")
+        message = root_error(0) or ""
+        if sys.platform == "win32":
+            self.assertIn("Administrator", message)
+        else:
+            self.assertIn("sudo", message)
 
     def test_default_gaps_stay_short(self) -> None:
         config = Config()
@@ -2283,7 +2325,7 @@ class WindowAndInputTests(unittest.TestCase):
         sys.platform = "win32"
         flags: list[int] = []
         try:
-            with patch("os.geteuid", side_effect=AssertionError("geteuid")), patch(
+            with patch("os.geteuid", create=True, side_effect=AssertionError("geteuid")), patch(
                 "activitysim.winchrome.is_user_admin", return_value=True
             ):
                 stderr = StringIO()
@@ -2296,7 +2338,7 @@ class WindowAndInputTests(unittest.TestCase):
                 def __init__(self, *_args, **_kwargs) -> None:
                     raise AssertionError("constructed")
 
-            with patch("os.geteuid", side_effect=AssertionError("geteuid")), patch(
+            with patch("os.geteuid", create=True, side_effect=AssertionError("geteuid")), patch(
                 "activitysim.winchrome.is_user_admin", return_value=False
             ), patch("activitysim.winchrome.set_execution_state", side_effect=flags.append), patch(
                 "activitysim.wininput.WinInput", Boom
@@ -2312,7 +2354,7 @@ class WindowAndInputTests(unittest.TestCase):
             runner = type("Runner", (), {})()
             runner.run = lambda: None
             flags.clear()
-            with patch("os.geteuid", side_effect=AssertionError("geteuid")), patch(
+            with patch("os.geteuid", create=True, side_effect=AssertionError("geteuid")), patch(
                 "activitysim.winchrome.is_user_admin", return_value=False
             ), patch("activitysim.winchrome.set_execution_state", side_effect=flags.append), patch(
                 "activitysim.cli.Runner", return_value=runner
@@ -2332,7 +2374,7 @@ class WindowAndInputTests(unittest.TestCase):
 
             runner.run = fail
             flags.clear()
-            with patch("os.geteuid", side_effect=AssertionError("geteuid")), patch(
+            with patch("os.geteuid", create=True, side_effect=AssertionError("geteuid")), patch(
                 "activitysim.winchrome.is_user_admin", return_value=False
             ), patch("activitysim.winchrome.set_execution_state", side_effect=flags.append), patch(
                 "activitysim.cli.Runner", return_value=runner
@@ -2361,7 +2403,7 @@ class WindowAndInputTests(unittest.TestCase):
             stdout = StringIO()
             with redirect_stdout(stdout):
                 code = _doctor_windows()
-        text = stdout.getvalue()
+        text = stdout.getvalue().replace("\\", "/")
         self.assertEqual(code, 0)
         self.assertIn("C:/chrome.exe", text)
         self.assertIn("C:/profile", text)
@@ -2445,7 +2487,13 @@ class EditorTests(unittest.TestCase):
             nested.mkdir(parents=True)
             (nested / "index.js").write_text("x", encoding="utf-8")
             (root / ".git").mkdir()
-            (root / "link.py").symlink_to(outside)
+            escaped = try_symlink(root / "link.py", outside)
+            if not escaped:
+                leak = Path(tmp) / "leak"
+                leak.mkdir()
+                (leak / "leak.py").write_text("x", encoding="utf-8")
+                escaped = try_dir_link(root / "leak", leak)
+            self.assertTrue(escaped, "could not create a symlink or junction")
             found = list_sources(root)
             self.assertEqual(found, ["README.md", "src/app.py"])
             self.assertEqual(find_token("src/app.py"), "app")
@@ -2669,7 +2717,10 @@ class EditorTests(unittest.TestCase):
             )
             connection.commit()
             connection.close()
-            (storage.parent / "link").symlink_to(escaped, target_is_directory=True)
+            self.assertTrue(
+                try_dir_link(storage.parent / "link", escaped),
+                "could not link a workspace directory outside the profile",
+            )
             hide_chat_layouts(root, real)
             connection = sqlite3.connect(db)
             saved = dict(connection.execute("SELECT key, value FROM ItemTable"))

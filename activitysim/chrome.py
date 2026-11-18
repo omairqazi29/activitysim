@@ -406,6 +406,20 @@ def _unquoted_argument(command: str, needle: str) -> bool:
         start = index + 1
 
 
+def _profile_token(path: str) -> str:
+    """Slash-insensitive profile key. Windows also ignores case.
+
+    Path('/tmp/name') stringifies with backslashes on Windows, while a
+    Chrome command line may keep the forward-slash form. A trailing slash
+    is the same directory.
+    """
+
+    text = path.replace("\\", "/").rstrip("/")
+    if sys.platform == "win32":
+        return text.casefold()
+    return text
+
+
 def _command_has_profile(command: str, profile: Path) -> bool:
     """True when --user-data-dir=profile is one whole argument.
 
@@ -413,11 +427,17 @@ def _command_has_profile(command: str, profile: Path) -> bool:
     value does not end it and a longer quoted value does not match. An
     unquoted macOS command line still matches a profile path that contains
     spaces. The switch has to be its own argument, not a substring.
+    Backslashes and forward slashes are the same path.
     """
 
     needle = f"--user-data-dir={profile}"
-    if any(arg == needle for arg in _split_command_line(command)):
-        return True
+    prefix = "--user-data-dir="
+    want = _profile_token(str(profile))
+    for arg in _split_command_line(command):
+        if arg == needle:
+            return True
+        if arg.startswith(prefix) and _profile_token(arg[len(prefix):]) == want:
+            return True
     if '"' in command:
         return False
     return _unquoted_argument(command, needle)

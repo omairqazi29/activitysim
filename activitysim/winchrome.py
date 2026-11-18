@@ -317,16 +317,23 @@ def _pid_of_window(user32, hwnd) -> int | None:
 
 
 def _enum_windows(user32, callback) -> None:
+    """Call EnumWindows. A ctypes function gets a callback prototype.
+
+    A plain callable has no argtypes. Tests use one, and macOS has no
+    WINFUNCTYPE, so both go straight to EnumWindows(callback, 0).
+    """
+
+    enum = user32.EnumWindows
     winfunc = getattr(ctypes, "WINFUNCTYPE", None)
-    if winfunc is None:
-        if not user32.EnumWindows(callback, 0):
+    if winfunc is None or not hasattr(enum, "argtypes"):
+        if not enum(callback, 0):
             raise OSError("EnumWindows failed")
         return
     proto = winfunc(ctypes.c_int, ctypes.c_void_p, ctypes.c_ssize_t)
-    user32.EnumWindows.argtypes = (proto, ctypes.c_ssize_t)
-    user32.EnumWindows.restype = ctypes.c_int
+    enum.argtypes = (proto, ctypes.c_ssize_t)
+    enum.restype = ctypes.c_int
     wrapped = proto(callback)
-    if not user32.EnumWindows(wrapped, 0):
+    if not enum(wrapped, 0):
         raise OSError("EnumWindows failed")
 
 
