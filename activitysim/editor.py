@@ -658,13 +658,50 @@ def checkout_path(root: Path, repo: str) -> Path:
     return dest
 
 
-def clone_command(repo: str, dest: Path) -> list[str]:
+def _git_candidates() -> list[Path]:
+    """Git installs a normal PowerShell session often cannot see.
+
+    `shutil.which("git")` is empty when git is not on PATH. The editor was
+    then skipped and the session opened GitHub.
+    """
+
+    roots = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]
+    found: list[Path] = []
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root)
+        found.append(base / "Git" / "cmd" / "git.exe")
+        found.append(base / "Programs" / "Git" / "cmd" / "git.exe")
+        found.extend(base.glob("grok/git/*/cmd/git.exe"))
+    return found
+
+
+def find_git() -> Path | None:
+    """The git executable, including one that is installed but not on PATH."""
+
+    found = shutil.which("git")
+    if found:
+        return Path(found)
+    if sys.platform != "win32":
+        return None
+    for path in _git_candidates():
+        if path.is_file():
+            return path
+    return None
+
+
+def clone_command(repo: str, dest: Path, git: str = "git") -> list[str]:
     """Shallow clone of one public GitHub repository. No shell."""
 
     if not repo_ok(repo):
         raise ValueError(f"refusing to clone {repo!r}")
     return [
-        "git",
+        git,
         "clone",
         "--depth",
         "1",
@@ -697,8 +734,11 @@ def ensure_checkout(
         return dest
     if dest.exists():
         return None
+    git = find_git()
+    if git is None and run is None:
+        return None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    command = clone_command(repo, dest)
+    command = clone_command(repo, dest, "git" if git is None else str(git))
     caller = subprocess.run if run is None else run
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -1169,7 +1209,10 @@ class GitWork:
         self.deck = CodeDeck(rng)
 
     def ready(self) -> bool:
-        return shutil.which("git") is not None
+        if find_git() is not None:
+            return True
+        # A checkout from an earlier run can still be opened.
+        return self.root.is_dir() and any(self.root.glob("*/*/.git"))
 
     def next_repo(self) -> str:
         return self.deck.next()

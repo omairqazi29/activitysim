@@ -291,6 +291,10 @@ class Runner:
             if self._code_available():
                 self._start_code()
             else:
+                self.log(
+                    "skipping Visual Studio Code because git is not available",
+                    error=True,
+                )
                 self._start_github()
             return
         kind = self._next_kind()

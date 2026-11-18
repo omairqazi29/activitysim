@@ -2460,6 +2460,26 @@ class EditorTests(unittest.TestCase):
             self.assertTrue(can_type(f"https://github.com/{repo}"), repo)
             self.assertNotIn("..", repo)
 
+    def test_editor_opens_when_git_is_not_on_path(self) -> None:
+        from activitysim.editor import GitWork, find_git
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkout = root / "pallets" / "flask"
+            (checkout / ".git").mkdir(parents=True)
+            work = GitWork(random.Random(1), root=root)
+            with patch("activitysim.editor.shutil.which", return_value=None), patch(
+                "activitysim.editor.find_git", return_value=None
+            ):
+                self.assertTrue(work.ready())
+            git = Path(tmp) / "cmd" / "git.exe"
+            git.parent.mkdir()
+            git.write_bytes(b"")
+            with patch("activitysim.editor.shutil.which", return_value=None), patch(
+                "activitysim.editor._git_candidates", return_value=[git]
+            ):
+                self.assertEqual(find_git(), git)
+
     def test_checkout_names_and_commands_stay_in_the_sandbox(self) -> None:
         self.assertFalse(repo_ok("../etc"))
         self.assertFalse(repo_ok("pallets/../secrets"))
