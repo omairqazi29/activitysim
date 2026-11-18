@@ -429,6 +429,16 @@ def activate(pid: int) -> None:
     if foreground_thread and foreground_thread != this_thread:
         attached = bool(user32.AttachThreadInput(this_thread, foreground_thread, True))
     try:
+        # A normal SetForegroundWindow is ignored while the user is in another
+        # app. An Alt tap is input from this process, which lets the new
+        # Code window come forward instead of staying behind GitHub.
+        tap = getattr(user32, "keybd_event", None)
+        if callable(tap):
+            tap(0x12, 0, 0, 0)
+            tap(0x12, 0, 0x0002, 0)
+        top = getattr(user32, "BringWindowToTop", None)
+        if callable(top):
+            top(hwnd)
         user32.SetForegroundWindow(hwnd)
     finally:
         if attached:

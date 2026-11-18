@@ -7,7 +7,7 @@ Chrome for GitHub and, less often, public benchmark sites. The clicks and
 keystrokes are real input events. An idle check that only watches the pointer
 and keyboard will see them. Changing a tab with AppleScript alone will not.
 
-A normal run prints `launching dev browser` and then stays quiet. Errors are
+A normal run prints `opening Visual Studio Code` and then stays quiet. Errors are
 printed on their own.
 
 That Chrome is a separate process with an empty profile. It does not see the
@@ -61,7 +61,7 @@ Administrator. Back in the browser is Alt+Left. The address bar is Ctrl+L.
   the text, and sometimes searches in the file. It closes the Chat and Claude
   Code side bar before it types, so a search is not entered there. It does not
   save. If Code asks to save, it chooses Don't Save. If that
-  window opens, the program prints `launching dev browser` and then stays
+  window opens, the program prints `opening Visual Studio Code` and then stays
   quiet. Your Chrome and your own Code stay as they were.
 - Later chapters keep that mix: about six in ten are the editor, about three
   in ten are GitHub, and about one in ten is a benchmark site. GitHub is a

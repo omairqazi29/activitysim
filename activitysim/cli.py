@@ -47,7 +47,7 @@ Those are real mouse clicks and keystrokes, which is what an idle check
 looks for. Your signed-in Chrome is not used, so the window has no X or
 GitHub session.
 
-A normal run prints "launching dev browser" and then stays quiet. If something
+A normal run prints "opening Visual Studio Code" and then stays quiet. If something
 fails, that error is printed instead. --dry-run still prints the session.
 
 On a Mac, if Accessibility is off, macOS is prompted and System Settings opens.

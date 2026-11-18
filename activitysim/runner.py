@@ -157,11 +157,11 @@ class Runner:
         if error:
             print(message, file=sys.stderr, flush=True)
 
-    def _announce(self) -> None:
+    def _announce(self, message: str) -> None:
         if self.config.dry_run or self._announced:
             return
         self._announced = True
-        print("launching dev browser", flush=True)
+        print(message, flush=True)
 
     def run(self) -> None:
         try:
@@ -383,7 +383,7 @@ class Runner:
             self.log(f"step failed: {exc}", error=True)
             self._leave_code()
             return
-        self._announce()
+        self._announce("opening Visual Studio Code")
         self.actions.append("code")
         self.log(f"checkout {repo}")
         self.log(f"chapter code {repo}")
@@ -917,7 +917,7 @@ class Runner:
 
     def _open_fresh(self, url: str) -> None:
         self.browser.open_window(url)
-        self._announce()
+        self._announce("opening signed-out Chrome")
         self.log(f"opened Chrome at {url}")
         self._remember_navigation(url)
 

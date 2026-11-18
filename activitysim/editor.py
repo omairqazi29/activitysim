@@ -1289,10 +1289,12 @@ class CodeEditor:
         if not self.pid:
             return
         if sys.platform == "win32":
+            from activitysim.winchrome import activate as activate_window
             from activitysim.winchrome import maximize
 
             try:
                 maximize(self.pid)
+                activate_window(self.pid)
             except OSError:
                 return
             return

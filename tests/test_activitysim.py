@@ -1047,7 +1047,7 @@ class RunnerTests(unittest.TestCase):
         stderr = StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             runner.run()
-        self.assertEqual(stdout.getvalue(), "launching dev browser\n")
+        self.assertEqual(stdout.getvalue(), "opening Visual Studio Code\n")
         self.assertEqual(stderr.getvalue(), "")
 
     def test_a_failed_launch_does_not_print_the_launch_line(self) -> None:
@@ -1059,7 +1059,7 @@ class RunnerTests(unittest.TestCase):
         with redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(OsaError):
                 runner.run()
-        self.assertNotIn("launching dev browser", stdout.getvalue())
+        self.assertNotIn("opening Visual Studio Code", stdout.getvalue())
         self.assertEqual(stdout.getvalue(), "")
 
         runner, _browser, _pointer, _clock = make_runner(duration=6, ready=False, seed=2)
@@ -1068,7 +1068,7 @@ class RunnerTests(unittest.TestCase):
         stderr = StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             runner.run()
-        self.assertNotIn("launching dev browser", stdout.getvalue())
+        self.assertNotIn("opening Visual Studio Code", stdout.getvalue())
         if sys.platform == "win32":
             self.assertIn("pointer could not be moved", stderr.getvalue())
             self.assertIn("Administrator", stderr.getvalue())
