@@ -62,6 +62,8 @@ RESULTS_EXPRESSION = r"""
     var rect = el.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) continue;
     if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+    var path = (parsed.pathname || "").toLowerCase();
+    if (/\.(gif|png|jpe?g|webp|svg|mp4|webm)$/.test(path)) continue;
     var title = (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200);
     links.push({
       href: parsed.href,

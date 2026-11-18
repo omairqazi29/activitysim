@@ -2170,8 +2170,7 @@ class WindowAndInputTests(unittest.TestCase):
         runner.find_results = lambda _bounds: [(500.0, 400.0)]
         with redirect_stdout(StringIO()):
             runner.run()
-        self.assertNotIn((500.0, 400.0), pointer.clicks)
-        self.assertTrue(any(point in pointer.clicks for point in result_points(browser.bounds_value)))
+        self.assertIn((500.0, 400.0), pointer.clicks)
 
         runner, _browser, pointer, _clock = make_runner(duration=25, seed=12)
         prefer_search(runner)
@@ -2397,7 +2396,7 @@ class WindowAndInputTests(unittest.TestCase):
                 "activitysim.cli.Runner", return_value=runner
             ), patch("activitysim.cli.Chrome", return_value=object()), patch(
                 "activitysim.wininput.WinInput", return_value=object()
-            ):
+            ), patch("activitysim.editor.stop_editor"):
                 with redirect_stdout(StringIO()):
                     code = main([
                         "run", "--caffeinate", "--for", "1s",
@@ -2417,7 +2416,7 @@ class WindowAndInputTests(unittest.TestCase):
                 "activitysim.cli.Runner", return_value=runner
             ), patch("activitysim.cli.Chrome", return_value=object()), patch(
                 "activitysim.wininput.WinInput", return_value=object()
-            ):
+            ), patch("activitysim.editor.stop_editor"):
                 with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                     code = main([
                         "run", "--caffeinate", "--for", "1s",
@@ -2975,6 +2974,19 @@ class EditorTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             runner._type_url(address)
         self.assertIn(address, pointer.typed)
+
+    def test_an_empty_search_is_not_clicked(self) -> None:
+        from activitysim.search import is_media_url
+
+        self.assertTrue(is_media_url("https://github.com/o/r/blob/main/demo.gif"))
+        self.assertTrue(is_media_url("https://camo.githubusercontent.com/a/b.gif"))
+        self.assertFalse(is_media_url("https://github.com/python/cpython"))
+        runner, _browser, pointer, _clock = make_runner(duration=8, seed=1, only="github")
+        runner.find_results = lambda _bounds: []
+        with redirect_stdout(StringIO()):
+            runner.run()
+        self.assertTrue(any("no repositories for that search" in line for line in runner.history))
+        self.assertEqual(pointer.clicks, [])
 
     def test_github_only_uses_advanced_search(self) -> None:
         runner, browser, pointer, _clock = make_runner(duration=12, seed=3, only="github")

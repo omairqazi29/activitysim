@@ -35,6 +35,7 @@ from activitysim.search import (
     in_result_zone,
     in_search_zone,
     is_advanced_url,
+    is_media_url,
     readme_point,
     result_points,
     results_url,
@@ -348,11 +349,12 @@ class Runner:
         try:
             repo = self.work.next_repo()
             folder = self.work.checkout(repo)
-        except (OSError, OsaError, ValueError, AttributeError):
+        except (OSError, OsaError, ValueError, AttributeError) as exc:
+            self.log(f"step failed: {exc}", error=True)
             self._leave_code()
             return
         if not folder:
-            self.log(f"skip checkout {repo}", error=self.config.only == "code")
+            self.log(f"skip checkout {repo}", error=True)
             self._leave_code()
             return
         try:
@@ -701,15 +703,20 @@ class Runner:
         if self.places is not None:
             self.places.leave_page()
             self.places.plan_repo(None)
-        query = self.queries.next()
         self.per_query = self.rng.randint(3, 5)
-        self.log(f"github advanced search: {query}")
-        self.actions.append("search")
-        self._submit_query(query)
-        self.points = self._collect_results()
-        self.pi = 0
-        self.mode = "results"
-        self.log(f"{len(self.points)} results to click")
+        self.points = []
+        for _attempt in range(3):
+            query = self.queries.next()
+            self.log(f"github advanced search: {query}")
+            self.actions.append("search")
+            self._submit_query(query)
+            self.points = self._collect_results()
+            self.pi = 0
+            self.mode = "results"
+            self.log(f"{len(self.points)} results to click")
+            if self.points or self.find_results is None:
+                return
+            self.log("no repositories for that search")
 
     def _submit_query(self, query: str) -> None:
         """Open the repository results for this query.
@@ -743,6 +750,11 @@ class Runner:
         self.mode = "item"
 
     def _read(self) -> None:
+        if is_media_url(self._current_url()):
+            self.reads_left = 0
+            self.log("leave an image")
+            self._back()
+            return
         if self.places is not None and self.places.saw_repo(self._current_url()):
             self.reads_left = 0
             self.log("skip a repo already open")
@@ -819,15 +831,16 @@ class Runner:
         if bounds is None:
             return []
         found: list[tuple[float, float]] = []
-        if self.find_results is not None:
-            try:
-                found = [tuple(point) for point in (self.find_results(bounds) or [])]
-            except (OSError, OsaError, ValueError, TypeError):
-                found = []
         scale = self._pixel_scale()
+        if self.find_results is None:
+            return [point for point in result_points(bounds, scale=scale) if in_result_zone(point, bounds, scale)][:8]
+        try:
+            found = [tuple(point) for point in (self.find_results(bounds) or [])]
+        except (OSError, OsaError, ValueError, TypeError):
+            return [point for point in result_points(bounds, scale=scale) if in_result_zone(point, bounds, scale)][:8]
         found = [point for point in found if in_result_zone(point, bounds, scale)]
-        if len(found) < 2:
-            found = result_points(bounds, scale=scale)
+        # The finder looked at the page. An empty list is an empty search,
+        # whose illustration is not a repository. Guessed points hit that image.
         return found[:8]
 
     def _search_box(self) -> tuple[float, float] | None:

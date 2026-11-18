@@ -72,6 +72,17 @@ def results_url(query: str) -> str:
     return f"https://github.com/search?q={quoted}&type=repositories"
 
 
+def is_media_url(url: str) -> bool:
+    """True for an image or video. Those pages are not a repository to read."""
+
+    parts = urlsplit(url or "")
+    host = parts.netloc.lower()
+    path = parts.path.lower()
+    if host.endswith("githubusercontent.com") or host.endswith("githubassets.com"):
+        return True
+    return path.endswith((".gif", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".mp4", ".webm"))
+
+
 def is_advanced_url(url: str) -> bool:
     parts = urlsplit(url)
     return parts.netloc.endswith("github.com") and parts.path.rstrip("/") == "/search/advanced"

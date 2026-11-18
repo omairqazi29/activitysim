@@ -282,10 +282,12 @@ def shut_down(browser, *, dry_run: bool) -> None:
 
     if dry_run or browser is None:
         return
-    try:
-        browser.close_window()
-    except OsaError as exc:
-        print(f"could not close the simulator window: {exc}", file=sys.stderr)
+    close = getattr(browser, "close_window", None)
+    if callable(close):
+        try:
+            close()
+        except OsaError as exc:
+            print(f"could not close the simulator window: {exc}", file=sys.stderr)
     try:
         from activitysim.editor import editor_profile_path, stop_editor
 
