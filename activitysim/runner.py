@@ -925,11 +925,24 @@ class Runner:
         self.log(f"opened Chrome at {url}")
         self._remember_navigation(url)
 
+    def _on_github(self) -> bool:
+        host = urlsplit(self._current_url()).netloc.lower()
+        return host == "github.com" or host.endswith(".github.com")
+
     def _type_url(self, url: str) -> None:
+        # GitHub's file filter sits on the left of a repository. Ctrl+L does
+        # not take the caret out of it, so a benchmark address would be typed
+        # there. Load the address directly instead.
+        if self._on_github():
+            self.browser.navigate(url)
+            self._remember_navigation(url)
+            return
         if not self._arm():
             self.browser.navigate(url)
             self._remember_navigation(url)
             return
+        self.pointer.hotkey("escape", ())
+        self._sleep(0.05)
         self.pointer.hotkey("l", ("command",))
         self._sleep(0.12)
         if not self._our_window_is_front() or not self._omnibox_is_safe():

@@ -90,16 +90,28 @@ RESULTS_EXPRESSION = r"""
 
 FOCUSED_EXPRESSION = r"""
 (() => {
-  var el = document.activeElement;
-  if (!el || !el.tagName) return {tag: "", editable: false};
+  function deep(root) {
+    var el = root && root.activeElement;
+    if (!el) return null;
+    if (el.shadowRoot) {
+      var inner = deep(el.shadowRoot);
+      if (inner) return inner;
+    }
+    return el;
+  }
+  var el = deep(document);
+  if (!el || !el.tagName) return {tag: "", editable: false, role: ""};
   var type = "";
   if (String(el.tagName).toLowerCase() === "input") {
     type = String(el.type || "text").toLowerCase();
   }
+  var role = "";
+  try { role = String(el.getAttribute("role") || "").toLowerCase(); } catch (err) { role = ""; }
   return {
     tag: String(el.tagName).toLowerCase(),
     type: type,
-    editable: el.isContentEditable === true
+    editable: el.isContentEditable === true,
+    role: role
   };
 })()
 """
@@ -297,6 +309,11 @@ def role_from_active(payload: object) -> str:
 
     if not isinstance(payload, dict):
         return ""
+    aria = str(payload.get("role") or "").lower()
+    if aria in {"searchbox", "textbox"}:
+        return "AXTextField"
+    if aria == "combobox":
+        return "AXComboBox"
     tag = str(payload.get("tag") or "").lower()
     editable = payload.get("editable")
     if isinstance(editable, str):

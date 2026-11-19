@@ -1652,6 +1652,8 @@ class WindowsLogicTests(unittest.TestCase):
     def test_focused_role_mapping(self) -> None:
         self.assertEqual(role_from_active({"tag": "input", "editable": False}), "AXTextField")
         self.assertEqual(role_from_active({"tag": "input", "type": "search"}), "AXTextField")
+        self.assertEqual(role_from_active({"tag": "div", "role": "searchbox"}), "AXTextField")
+        self.assertEqual(role_from_active({"tag": "div", "role": "combobox"}), "AXComboBox")
         self.assertEqual(role_from_active({"tag": "input", "type": "checkbox"}), "button")
         self.assertEqual(role_from_active({"tag": "input", "type": "submit"}), "button")
         self.assertEqual(role_from_active({"tag": "textarea", "editable": False}), "AXTextField")
@@ -3007,7 +3009,13 @@ class EditorTests(unittest.TestCase):
 
         runner.focused_role = lambda: ""
         pointer.typed.clear()
-        address = "https://github.com/search/advanced"
+        address = "https://www.swebench.com/"
+        with redirect_stdout(StringIO()):
+            runner._type_url(address)
+        self.assertNotIn(address, pointer.typed)
+        self.assertEqual(browser.current_url(), address)
+        browser.open_window("https://example.com/")
+        pointer.typed.clear()
         with redirect_stdout(StringIO()):
             runner._type_url(address)
         self.assertIn(address, pointer.typed)
